@@ -25,7 +25,7 @@ conductor.onMirror((text) => post(sessions.CONDUCTOR_KEY, text));
 
 function lineFor(msg) {
   const attachments = [...msg.attachments.values()].map((a) => `[attachment] ${a.url}`);
-  const author = msg.member?.displayName || msg.author.globalName || msg.author.username;
+  const author = (msg.member?.displayName || msg.author.globalName || msg.author.username) + (msg.author.bot ? ' [bot]' : '');
   return `${author} (msg ${msg.id}): ${[msg.content, ...attachments].filter(Boolean).join('\n')}`;
 }
 
@@ -41,7 +41,7 @@ function preface(threadKey, msg, isDM, threadName) {
 // anyone in a tracked thread or a thread under a watched channel; anyone, anywhere, by @mention
 // (a channel @mention opens a thread on that message, a thread @mention adopts the thread).
 async function onMessage(msg) {
-  if (msg.author.bot) return;
+  if (msg.author.id === client.user.id) return; // other bots are senders like anyone else; only our own posts are ignored
   const isDM = msg.channel.type === ChannelType.DM;
   const mentioned = !isDM && msg.mentions.users.has(client.user.id);
   let threadKey, guildId, channelId, model, threadName;
@@ -71,7 +71,7 @@ async function onMessage(msg) {
   }
 
   sessions.ensureThread({ threadKey, guildId, channelId, model });
-  const h = header({ discordId: msg.author.id, displayName: msg.author.globalName || msg.author.username, guildId,
+  const h = header({ discordId: msg.author.id, displayName: msg.author.globalName || msg.author.username, isBot: msg.author.bot, guildId,
     guildName: msg.guild?.name, channelName: isDM ? null : (msg.channel.parent?.name || msg.channel.name), isDM });
   const item = { text: `${h.line}\n${lineFor(msg)}`, msgId: msg.id, mention: mentioned };
   if (!sessions.isStarted(threadKey)) {
@@ -93,7 +93,7 @@ async function bootSweep() {
     if (ch.archived) continue;
     const recent = await ch.messages.fetch({ limit: 10 }).catch(() => null);
     if (!recent) continue;
-    const missed = [...recent.values()].filter((m) => !m.author.bot && BigInt(m.id) > BigInt(row.last_delivered_id || '0'))
+    const missed = [...recent.values()].filter((m) => m.author.id !== client.user.id && BigInt(m.id) > BigInt(row.last_delivered_id || '0'))
       .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
     for (const m of missed) await onMessage(m).catch((e) => console.error('sweep onMessage:', e.message));
     if (missed.length) console.log(`boot sweep: ${missed.length} missed in ${row.thread_key}`);
