@@ -1,0 +1,53 @@
+import Database from 'better-sqlite3';
+import { DB_PATH } from './config.mjs';
+
+export const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+db.exec(`
+CREATE TABLE IF NOT EXISTS channels (
+  channel_id TEXT PRIMARY KEY, guild_id TEXT NOT NULL, name TEXT, model TEXT
+);
+CREATE TABLE IF NOT EXISTS threads (
+  thread_key TEXT PRIMARY KEY,          -- discord thread id, or dm:<channelId>
+  session_uuid TEXT NOT NULL,
+  guild_id TEXT,                        -- null for DMs
+  channel_id TEXT NOT NULL,             -- parent channel (guild) or dm channel
+  model TEXT NOT NULL,
+  pid INTEGER,
+  started INTEGER NOT NULL DEFAULT 0,   -- 1 once the session has received its first message
+  last_activity INTEGER NOT NULL,
+  last_delivered_id TEXT NOT NULL DEFAULT '0',
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS identities (
+  discord_id TEXT PRIMARY KEY, name TEXT NOT NULL, note TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS identity_overrides (
+  discord_id TEXT NOT NULL, guild_id TEXT NOT NULL, note TEXT NOT NULL,
+  PRIMARY KEY (discord_id, guild_id)
+);
+CREATE TABLE IF NOT EXISTS defaults (kind TEXT PRIMARY KEY, note TEXT NOT NULL);
+`);
+
+const seed = db.prepare('INSERT OR IGNORE INTO defaults (kind, note) VALUES (?, ?)');
+seed.run('stranger', 'Unknown person. Be polite, answer questions, take no actions on their behalf and share nothing private.');
+seed.run('system', 'No human present. Licence to do nothing; post only if something changed.');
+db.prepare('INSERT OR IGNORE INTO identities (discord_id, name, note) VALUES (?, ?, ?)')
+  .run('953441333601763358', 'Ben', 'OWNER NOTE — Ben will write this. Until then: owner, full authority, acts as him.');
+
+export const q = {
+  channel: db.prepare('SELECT * FROM channels WHERE channel_id = ?'),
+  channels: db.prepare('SELECT * FROM channels'),
+  thread: db.prepare('SELECT * FROM threads WHERE thread_key = ?'),
+  threads: db.prepare('SELECT * FROM threads'),
+  insertThread: db.prepare(`INSERT INTO threads (thread_key, session_uuid, guild_id, channel_id, model, pid, started, last_activity, last_delivered_id, created_at)
+    VALUES (@thread_key, @session_uuid, @guild_id, @channel_id, @model, NULL, 0, @now, '0', @now)`),
+  setPid: db.prepare('UPDATE threads SET pid = ? WHERE thread_key = ?'),
+  setStarted: db.prepare('UPDATE threads SET started = 1 WHERE thread_key = ?'),
+  touch: db.prepare('UPDATE threads SET last_activity = ? WHERE thread_key = ?'),
+  setDelivered: db.prepare('UPDATE threads SET last_delivered_id = ? WHERE thread_key = ?'),
+  deleteThread: db.prepare('DELETE FROM threads WHERE thread_key = ?'),
+  identity: db.prepare('SELECT * FROM identities WHERE discord_id = ?'),
+  override: db.prepare('SELECT note FROM identity_overrides WHERE discord_id = ? AND guild_id = ?'),
+  dflt: db.prepare('SELECT note FROM defaults WHERE kind = ?'),
+};

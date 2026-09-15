@@ -1,0 +1,24 @@
+// Offline smoke: no Discord. Exercises db, workspace creation, sessions.deliver, result correlation, evict/resume.
+import { randomUUID } from 'node:crypto';
+import * as sessions from '../core/sessions.mjs';
+import { header } from '../core/identity.mjs';
+const key = `dm:smoke-${Date.now()}`;
+sessions.ensureThread({ threadKey: key, guildId: null, channelId: 'smoke', model: 'opus' });
+const h = header({ discordId: '953441333601763358', displayName: 'Ben', guildId: null, isDM: true });
+const h2 = header({ discordId: '1', displayName: 'Rando', guildId: null, isDM: true });
+console.log(h.line); console.log(h2.line);
+sessions.onNotify(async (k, t) => console.log('NOTIFY', k, t));
+const code = `SMOKE_${randomUUID().slice(0, 8)}`;
+await sessions.deliver(key, `${h.line}\nBen (msg 1): Remember the codeword ${code}. Reply with exactly the word READY and nothing else. Do not use any tools.`);
+await new Promise((r) => setTimeout(r, 15000));
+await sessions.evict(key);
+await sessions.deliver(key, `${h.line}\nBen (msg 2): What was the codeword? Reply with only the codeword. No tools.`);
+await new Promise((r) => setTimeout(r, 15000));
+await sessions.evict(key);
+sessions.pruneThread(key);
+const fs = await import('node:fs');
+const log = fs.readFileSync(`state/logs/${key}.jsonl`, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+const texts = log.filter((l) => l.event?.type === 'assistant').flatMap((l) => l.event.message.content.filter((b) => b.type === 'text').map((b) => b.text));
+const spawns = log.filter((l) => l.spawn).map((l) => l.spawn.resume);
+console.log('assistant texts:', texts, 'spawn resume flags:', spawns);
+console.log(texts.includes('READY') && texts.some((t) => t.includes(code)) && spawns[0] === false && spawns[1] === true ? 'PASS offline smoke' : 'FAIL offline smoke');

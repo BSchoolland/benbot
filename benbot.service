@@ -1,0 +1,16 @@
+[Unit]
+Description=BenBot — Discord-resident agent (one live claude process per thread)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/Projects/benbot
+ExecStart=%h/.nvm/versions/node/v24.13.0/bin/node core/index.mjs
+Environment=PATH=%h/.local/bin:%h/.nvm/versions/node/v24.13.0/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=40
+
+[Install]
+WantedBy=default.target

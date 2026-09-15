@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+// Manage who BenBot knows and what they may ask for.
+//   identity list
+//   identity set <discord_id> <name> "<note Ben writes>"
+//   identity override <discord_id> <guild_id> "<note for that server>"
+//   identity default <stranger|system> "<note>"
+//   identity rm <discord_id>
+import { db } from '../core/db.mjs';
+const [cmd, ...a] = process.argv.slice(2);
+const run = {
+  list() {
+    console.log('identities:'); for (const r of db.prepare('SELECT * FROM identities').all()) console.log(` ${r.discord_id}  ${r.name}: ${r.note}`);
+    console.log('overrides:'); for (const r of db.prepare('SELECT * FROM identity_overrides').all()) console.log(` ${r.discord_id} @ ${r.guild_id}: ${r.note}`);
+    console.log('defaults:'); for (const r of db.prepare('SELECT * FROM defaults').all()) console.log(` ${r.kind}: ${r.note}`);
+  },
+  set: (id, name, note) => db.prepare('INSERT INTO identities (discord_id, name, note) VALUES (?, ?, ?) ON CONFLICT(discord_id) DO UPDATE SET name=excluded.name, note=excluded.note').run(id, name, note),
+  override: (id, guild, note) => db.prepare('INSERT INTO identity_overrides (discord_id, guild_id, note) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET note=excluded.note').run(id, guild, note),
+  default: (kind, note) => db.prepare('INSERT INTO defaults (kind, note) VALUES (?, ?) ON CONFLICT(kind) DO UPDATE SET note=excluded.note').run(kind, note),
+  rm: (id) => db.prepare('DELETE FROM identities WHERE discord_id = ?').run(id),
+};
+if (!run[cmd] || a.some((x) => x === undefined)) { console.error('usage: see header of scripts/identity'); process.exit(2); }
+const r = run[cmd](...a); if (r?.changes !== undefined) console.log(`${r.changes} row(s)`);
