@@ -10,7 +10,7 @@ Architecture (Ben's): **AGENT** (`claude`, via `core/drivers/claude.mjs`) · **C
 ## Core, one file each
 | file | does |
 |---|---|
-| `core/gateway.mjs` | discord.js client. Watched channels (table `channels`) open a thread per known-person message; threads under them and DMs from known people are inputs. @mentioning the bot, or a second message while it is still mid-turn, soft-interrupts the current turn before delivery. Boot sweep for messages missed while down. |
+| `core/gateway.mjs` | discord.js client. Watched channels (table `channels`) open a thread per known-person message; an @mention of the bot in any channel of any server opens a thread on that message (in a thread, adopts it). Tracked threads, threads under watched channels, and DMs from known people are inputs. @mentioning the bot, or a second message while it is still mid-turn, soft-interrupts the current turn before delivery. Boot sweep for messages missed while down. |
 | `core/identity.mjs` | Stamps every input with `[from: name · where · role] note` from `identities` / `identity_overrides` / `defaults`. Ben writes the notes. |
 | `core/queue.mjs` | The single input queue: per-thread debounce (1.5 s) + coalesce, delivered in order; threads independent. |
 | `core/sessions.mjs` | Thread ↔ session table, spawn/resume/inject/interrupt/evict, idle eviction (30 min), per-thread event logs, ⚠️ error surfacing, orphan reaping on boot. |

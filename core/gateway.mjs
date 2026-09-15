@@ -25,42 +25,47 @@ function lineFor(msg) {
   return `${author} (msg ${msg.id}): ${[msg.content, ...attachments].filter(Boolean).join('\n')}`;
 }
 
-function preface(threadKey, msg, isDM) {
+function preface(threadKey, msg, isDM, threadName) {
   const id = discordIdOf(threadKey);
   const where = isDM ? `a DM with ${msg.author.globalName || msg.author.username}`
-    : `thread "${msg.channel.name}" under #${msg.channel.parent?.name} in ${msg.guild.name}`;
+    : `thread "${threadName}" under #${msg.channel.isThread() ? msg.channel.parent?.name : msg.channel.name} in ${msg.guild.name}`;
   return `[session start · ${where} · thread id ${id}. Speak only with bin/discord-send ${id} … — nothing else reaches anyone. React with bin/discord-react ${id} <msg id> <emoji>.]`;
 }
 
+// Routing: DMs from known people; known people's messages in watched channels open a thread;
+// anyone in a tracked thread or a thread under a watched channel; anyone, anywhere, by @mention
+// (a channel @mention opens a thread on that message, a thread @mention adopts the thread).
 async function onMessage(msg) {
   if (msg.author.bot) return;
   const isDM = msg.channel.type === ChannelType.DM;
-  let threadKey, guildId, channelId, model;
+  const mentioned = !isDM && msg.mentions.users.has(client.user.id);
+  let threadKey, guildId, channelId, model, threadName;
 
   if (isDM) {
     if (!q.identity.get(msg.author.id)) return; // unknown people can't open DM sessions (cost + safety); add them to identities
     threadKey = dmKey(msg.channelId); guildId = null; channelId = msg.channelId; model = DEFAULT_MODEL;
-  } else if (q.channel.get(msg.channelId)) {
-    // watched channel: known identities open a thread on their message
-    if (!q.identity.get(msg.author.id)) return;
+  } else if (msg.channel.isThread()) {
+    const watched = q.channel.get(msg.channel.parentId);
+    if (!watched && !mentioned && !q.thread.get(msg.channelId)) return;
+    threadKey = msg.channelId; guildId = msg.guildId; channelId = msg.channel.parentId; model = watched?.model || DEFAULT_MODEL;
+    threadName = msg.channel.name;
+  } else {
     const watched = q.channel.get(msg.channelId);
+    if (!mentioned && !(watched && q.identity.get(msg.author.id))) return;
     let thread = msg.hasThread ? msg.thread : null;
     if (!thread) {
       const name = (msg.content || '').replace(/<[@#][!&]?\d+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'chat';
       thread = await msg.startThread({ name });
     }
-    threadKey = thread.id; guildId = msg.guildId; channelId = msg.channelId; model = watched.model || DEFAULT_MODEL;
-  } else if (msg.channel.isThread?.() && q.channel.get(msg.channel.parentId)) {
-    // inside a thread under a watched channel: anyone in the server may talk; identity header says what they may ask
-    const watched = q.channel.get(msg.channel.parentId);
-    threadKey = msg.channelId; guildId = msg.guildId; channelId = msg.channel.parentId; model = watched.model || DEFAULT_MODEL;
-  } else return;
+    threadKey = thread.id; guildId = msg.guildId; channelId = msg.channelId; model = watched?.model || DEFAULT_MODEL;
+    threadName = thread.name;
+  }
 
   sessions.ensureThread({ threadKey, guildId, channelId, model });
   const h = header({ discordId: msg.author.id, displayName: msg.author.globalName || msg.author.username, guildId,
     guildName: msg.guild?.name, channelName: isDM ? null : (msg.channel.parent?.name || msg.channel.name), isDM });
-  const item = { text: `${h.line}\n${lineFor(msg)}`, msgId: msg.id, mention: msg.mentions.has(client.user) };
-  if (!sessions.isStarted(threadKey)) item.preface = preface(threadKey, msg, isDM);
+  const item = { text: `${h.line}\n${lineFor(msg)}`, msgId: msg.id, mention: mentioned };
+  if (!sessions.isStarted(threadKey)) item.preface = preface(threadKey, msg, isDM, threadName);
   enqueue(threadKey, item);
 }
 
