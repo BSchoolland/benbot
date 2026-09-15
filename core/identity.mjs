@@ -17,3 +17,7 @@ export function header({ discordId, displayName, guildId, guildName, channelName
 export function systemHeader(source) {
   return `[from: system · ${source}] ${q.dflt.get('system').note}`;
 }
+
+export function reportHeader(source) {
+  return `[from: ${source} · report to the conductor] ${q.dflt.get('system').note}`;
+}

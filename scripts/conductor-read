@@ -1,0 +1,11 @@
+#!/usr/bin/env node
+// Recent activity of the conductor (its channel: job reports, its own posts, Ben's debugging talk).
+//   conductor-read [--limit N]
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { setting } from '../core/db.mjs';
+const ch = setting('conductor_channel');
+if (!ch) { console.error('no conductor channel configured (scripts/channels conductor <channel_id> <guild_id>)'); process.exit(2); }
+const here = path.dirname(fileURLToPath(import.meta.url));
+process.stdout.write(execFileSync(path.join(here, 'discord-read'), [ch, ...process.argv.slice(2)], { encoding: 'utf8' }));

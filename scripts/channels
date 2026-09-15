@@ -3,12 +3,18 @@
 //   channels list
 //   channels watch <channel_id> <guild_id> [model] [name]
 //   channels unwatch <channel_id>
-import { db } from '../core/db.mjs';
+//   channels conductor <channel_id> <guild_id> [model]   (the conductor's own channel; talk to it there)
+import { db, q } from '../core/db.mjs';
 const [cmd, ...a] = process.argv.slice(2);
 const run = {
-  list() { for (const r of db.prepare('SELECT * FROM channels').all()) console.log(`${r.channel_id}  guild ${r.guild_id}  model ${r.model ?? '(default)'}  ${r.name ?? ''}`); },
+  list() { for (const r of db.prepare('SELECT * FROM channels').all()) console.log(`${r.channel_id}  guild ${r.guild_id}  ${r.mode}  model ${r.model ?? '(default)'}  ${r.name ?? ''}`); },
   watch: (ch, guild, model = null, name = null) => db.prepare('INSERT INTO channels (channel_id, guild_id, model, name) VALUES (?, ?, ?, ?) ON CONFLICT(channel_id) DO UPDATE SET guild_id=excluded.guild_id, model=excluded.model, name=excluded.name').run(ch, guild, model, name),
   unwatch: (ch) => db.prepare('DELETE FROM channels WHERE channel_id = ?').run(ch),
+  conductor(ch, guild, model = 'opus') {
+    db.prepare("INSERT INTO channels (channel_id, guild_id, model, name, mode) VALUES (?, ?, ?, 'conductor', 'conductor') ON CONFLICT(channel_id) DO UPDATE SET guild_id=excluded.guild_id, model=excluded.model, mode='conductor'").run(ch, guild, model);
+    for (const [k, v] of [['conductor_channel', ch], ['conductor_guild', guild], ['conductor_model', model]]) q.setSetting.run(k, v);
+    return { changes: 1 };
+  },
 };
 if (!run[cmd]) { console.error('usage: see header of scripts/channels'); process.exit(2); }
 const r = run[cmd](...a); if (r?.changes !== undefined) console.log(`${r.changes} row(s)`);

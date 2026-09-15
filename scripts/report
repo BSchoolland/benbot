@@ -1,0 +1,12 @@
+#!/usr/bin/env node
+// Tell the conductor something. Usage: report "<text>"  |  echo "text" | report -
+// Source is the calling session (BENBOT_THREAD); pass --from <name> to override.
+import fs from 'node:fs';
+import { db } from '../core/db.mjs';
+const a = process.argv.slice(2);
+let source = process.env.BENBOT_THREAD || 'unknown';
+const fi = a.indexOf('--from'); if (fi >= 0) { source = a[fi + 1]; a.splice(fi, 2); }
+const text = (a[0] === '-' ? fs.readFileSync(0, 'utf8') : a.join(' ')).trim();
+if (!text) { console.error('usage: report "<text>" | report -'); process.exit(2); }
+db.prepare('INSERT INTO inbox (source, text, created_at) VALUES (?, ?, ?)').run(source, text, Date.now());
+console.log(`reported to the conductor as ${source}`);

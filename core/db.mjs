@@ -27,7 +27,29 @@ CREATE TABLE IF NOT EXISTS identity_overrides (
   PRIMARY KEY (discord_id, guild_id)
 );
 CREATE TABLE IF NOT EXISTS defaults (kind TEXT PRIMARY KEY, note TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS jobs (
+  name TEXT PRIMARY KEY,
+  cron TEXT NOT NULL,                   -- 5-field crontab expression, local time
+  model TEXT NOT NULL,
+  prompt TEXT NOT NULL,                 -- delivered to the job's thread on every tick
+  cwd TEXT,                             -- workspace for the job's session; null = workspaces/jobs
+  enabled INTEGER NOT NULL DEFAULT 1,
+  run_now INTEGER NOT NULL DEFAULT 0,   -- set by scripts/jobs run; the scheduler ticks it within seconds
+  last_run_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS inbox (      -- reports from sessions to the conductor (written by scripts/report)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER
+);
 `);
+if (!db.prepare("PRAGMA table_info(channels)").all().some((c) => c.name === 'mode')) {
+  db.exec("ALTER TABLE channels ADD COLUMN mode TEXT NOT NULL DEFAULT 'threads'"); // threads | conductor
+}
 
 const seed = db.prepare('INSERT OR IGNORE INTO defaults (kind, note) VALUES (?, ?)');
 seed.run('stranger', 'Unknown person. Be polite, answer questions, take no actions on their behalf and share nothing private.');
@@ -50,4 +72,12 @@ export const q = {
   identity: db.prepare('SELECT * FROM identities WHERE discord_id = ?'),
   override: db.prepare('SELECT note FROM identity_overrides WHERE discord_id = ? AND guild_id = ?'),
   dflt: db.prepare('SELECT note FROM defaults WHERE kind = ?'),
+  setting: db.prepare('SELECT value FROM settings WHERE key = ?'),
+  setSetting: db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'),
+  job: db.prepare('SELECT * FROM jobs WHERE name = ?'),
+  jobs: db.prepare('SELECT * FROM jobs ORDER BY name'),
+  jobRan: db.prepare('UPDATE jobs SET last_run_at = ?, run_now = 0 WHERE name = ?'),
+  inboxPending: db.prepare('SELECT * FROM inbox WHERE delivered_at IS NULL ORDER BY id'),
+  inboxDelivered: db.prepare('UPDATE inbox SET delivered_at = ? WHERE id = ?'),
 };
+export const setting = (key) => q.setting.get(key)?.value ?? null;

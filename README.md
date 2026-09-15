@@ -13,17 +13,20 @@ Architecture (Ben's): **AGENT** (`claude`, via `core/drivers/claude.mjs`) · **C
 | `core/gateway.mjs` | discord.js client. Watched channels (table `channels`) open a thread per known-person message; an @mention of the bot in any channel of any server opens a thread on that message (in a thread, adopts it). Tracked threads, threads under watched channels, and DMs from known people are inputs. @mentioning the bot, or a second message while it is still mid-turn, soft-interrupts the current turn before delivery. Boot sweep for messages missed while down. |
 | `core/identity.mjs` | Stamps every input with `[from: name · where · role] note` from `identities` / `identity_overrides` / `defaults`. Ben writes the notes. |
 | `core/queue.mjs` | The single input queue: per-thread debounce (1.5 s) + coalesce, delivered in order; threads independent. |
-| `core/sessions.mjs` | Thread ↔ session table, spawn/resume/inject/interrupt/evict, idle eviction (30 min), per-thread event logs, ⚠️ error surfacing, orphan reaping on boot. |
+| `core/sessions.mjs` | Thread ↔ session table, spawn/resume/inject/interrupt/evict, idle eviction (50 min; chat sessions post a summary to the conductor first), per-thread event logs, ⚠️ error surfacing, orphan reaping on boot. |
 | `core/drivers/claude.mjs` | The verified runtime from the lab: spawn, `inject`, `interrupt`, `evict`, `resume`, events. |
-| `core/db.mjs` / `state/state.db` | sqlite: `threads`, `channels`, `identities`, `identity_overrides`, `defaults`. |
+| `core/conductor.mjs` | The one privileged session (`conductor`, its own channel, `CONDUCTOR.md` as its CLAUDE.md). Receives job reports (`inbox` table, written by `scripts/report`), idle-eviction summaries and new-conversation notices; the only thing that posts to humans unprompted. |
+| `core/jobs.mjs` | Scheduler over the `jobs` table: a due job is a tick delivered into its own long-lived session `job:<name>`, never a fresh process. Job sessions report to the conductor. |
+| `core/db.mjs` / `state/state.db` | sqlite: `threads`, `channels`, `identities`, `identity_overrides`, `defaults`, `settings`, `jobs`, `inbox`. |
 
 Rules the code relies on (measured in `~/Projects/excalibur-19-lab/FINDINGS.md`): results are correlated by
 `user_message_uuids`; an interrupt shows up as `is_error` + `terminal_reason: aborted_tools` and is not an error;
 resume emits an empty zero-turn result first; SIGTERM loses background children, resume restores the conversation.
 
 ## Per-server workspaces
-Sessions are cwd-bound, so each server gets `workspaces/<guildId>/` (DMs: `workspaces/dm/`), created on first use with
-symlinks `CLAUDE.md`, `TEAM`, `bin → scripts`, `.claude/skills → skills`. Put server-specific skills or notes in a
+Sessions are cwd-bound, so each server gets `workspaces/<guildId>/` (DMs: `workspaces/dm/`, jobs: `workspaces/jobs/` or the
+job's `cwd`, the conductor: `workspaces/conductor/` with `CONDUCTOR.md` as its CLAUDE.md), created on first use with
+symlinks `CLAUDE.md`, `TEAM`, `bin → scripts`, `.claude/skills → skills`. Every session gets `BENBOT_THREAD` in its environment. Put server-specific skills or notes in a
 workspace by replacing a symlink with a real file.
 
 ## Setup
@@ -32,6 +35,8 @@ npm install
 printf 'DISCORD_TOKEN=...\n' > .env            # AGENT_MODEL=fable, OWNER_IDS=..., IDLE_EVICT_MS, DEBOUNCE_MS optional
 scripts/channels watch <channelId> <guildId> [model]   # which channels open threads
 scripts/identity set <discordId> <Name> "<note>"       # who may talk, and what they may ask
+scripts/channels conductor <channelId> <guildId> [model] # the conductor's channel (job reports show here; talk to it for debugging)
+scripts/jobs add <name> "<cron>" <model> "<prompt>" [cwd] # scheduled work; scripts/jobs list · run · enable · disable
 cp benbot.service ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now benbot
 ```
 Bot needs the Message Content and Server Members intents and permission to create/manage threads and add reactions.
@@ -40,7 +45,7 @@ Bot needs the Message Content and Server Members intents and permission to creat
 ```sh
 journalctl --user -u benbot -f          # bot log
 state/logs/<threadKey>.jsonl            # every stream-json event of that session
-scripts/identity list · scripts/channels list
+scripts/identity list · scripts/channels list · scripts/jobs list · scripts/conductor-read
 ```
 Reset one conversation: `sqlite3 state/state.db "delete from threads where thread_key='<id>'"`.
 Restarting the bot SIGTERMs live agents (a child's stdin can't be re-attached); conversations resume on the next message.

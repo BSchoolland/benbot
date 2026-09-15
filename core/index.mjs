@@ -1,8 +1,12 @@
 import { startGateway, client } from './gateway.mjs';
 import * as sessions from './sessions.mjs';
+import * as conductor from './conductor.mjs';
+import { startScheduler } from './jobs.mjs';
 
 sessions.reapOrphans();
 setInterval(() => sessions.evictIdle().catch((e) => console.error('evictIdle:', e.message)), 60_000).unref();
+setInterval(() => { try { conductor.drainInbox(); } catch (e) { console.error('drainInbox:', e.message); } }, 2_000).unref();
+startScheduler();
 
 let stopping = false;
 async function shutdown(sig) {

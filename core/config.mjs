@@ -28,7 +28,7 @@ export const DEFAULT_MODEL = env.AGENT_MODEL || 'fable';
 export const CLAUDE_BIN = env.CLAUDE_BIN || path.join(os.homedir(), '.local', 'bin', 'claude');
 export const CCR_BIN = env.CCR_BIN || path.join(os.homedir(), 'Projects', 'claude-router', 'bin', 'ccr');
 export const DEBOUNCE_MS = Number(env.DEBOUNCE_MS || 1500);
-export const IDLE_EVICT_MS = Number(env.IDLE_EVICT_MS || 30 * 60 * 1000);
+export const IDLE_EVICT_MS = Number(env.IDLE_EVICT_MS || 50 * 60 * 1000);
 
 fs.mkdirSync(LOG_DIR, { recursive: true });
 fs.mkdirSync(WORKSPACES, { recursive: true });

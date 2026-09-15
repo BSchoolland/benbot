@@ -1,0 +1,24 @@
+#!/usr/bin/env node
+// Scheduled jobs: each is a recurring input to its own long-lived session (job:<name>).
+//   jobs list
+//   jobs add <name> "<cron>" <model> "<prompt>" [cwd]      (5-field crontab, local time)
+//   jobs rm|enable|disable <name>
+//   jobs run <name>                                         (tick it within seconds, via the running bot)
+import { db, q } from '../core/db.mjs';
+const [cmd, ...a] = process.argv.slice(2);
+const run = {
+  list() {
+    for (const j of q.jobs.all()) {
+      const last = j.last_run_at ? new Date(j.last_run_at).toISOString().slice(0, 16) : 'never';
+      console.log(`${j.enabled ? '●' : '○'} ${j.name}  [${j.cron}]  ${j.model}  last ${last}  cwd ${j.cwd ?? '(jobs)'}\n    ${j.prompt.replace(/\s+/g, ' ').slice(0, 140)}`);
+    }
+  },
+  add: (name, cron, model, prompt, cwd = null) => db.prepare(`INSERT INTO jobs (name, cron, model, prompt, cwd, created_at) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(name) DO UPDATE SET cron=excluded.cron, model=excluded.model, prompt=excluded.prompt, cwd=excluded.cwd`).run(name, cron, model, prompt, cwd, Date.now()),
+  rm: (name) => db.prepare('DELETE FROM jobs WHERE name = ?').run(name),
+  enable: (name) => db.prepare('UPDATE jobs SET enabled = 1 WHERE name = ?').run(name),
+  disable: (name) => db.prepare('UPDATE jobs SET enabled = 0 WHERE name = ?').run(name),
+  run: (name) => db.prepare('UPDATE jobs SET run_now = 1 WHERE name = ?').run(name),
+};
+if (!run[cmd] || a.some((x) => x === undefined)) { console.error('usage: see header of scripts/jobs'); process.exit(2); }
+const r = run[cmd](...a); if (r?.changes !== undefined) console.log(`${r.changes} row(s)`);

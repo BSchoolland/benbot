@@ -4,6 +4,7 @@ import { q } from './db.mjs';
 import { header } from './identity.mjs';
 import { enqueue } from './queue.mjs';
 import * as sessions from './sessions.mjs';
+import * as conductor from './conductor.mjs';
 
 export const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent,
@@ -12,12 +13,15 @@ export const client = new Client({
 });
 
 const dmKey = (channelId) => `dm:${channelId}`;
-const discordIdOf = (threadKey) => threadKey.startsWith('dm:') ? threadKey.slice(3) : threadKey;
+const discordIdOf = (threadKey) => threadKey.startsWith('dm:') ? threadKey.slice(3)
+  : sessions.isChat(threadKey) ? threadKey : conductor.channelId();
 
-sessions.onNotify(async (threadKey, text) => {
+async function post(threadKey, text) {
   const ch = await client.channels.fetch(discordIdOf(threadKey));
-  await ch.send(text);
-});
+  await ch.send(sessions.isChat(threadKey) ? text : `[${threadKey}] ${text}`);
+}
+sessions.onNotify(post);
+conductor.onMirror((text) => post(sessions.CONDUCTOR_KEY, text));
 
 function lineFor(msg) {
   const attachments = [...msg.attachments.values()].map((a) => `[attachment] ${a.url}`);
@@ -29,7 +33,8 @@ function preface(threadKey, msg, isDM, threadName) {
   const id = discordIdOf(threadKey);
   const where = isDM ? `a DM with ${msg.author.globalName || msg.author.username}`
     : `thread "${threadName}" under #${msg.channel.isThread() ? msg.channel.parent?.name : msg.channel.name} in ${msg.guild.name}`;
-  return `[session start · ${where} · thread id ${id}. Speak only with bin/discord-send ${id} … — nothing else reaches anyone. React with bin/discord-react ${id} <msg id> <emoji>.]`;
+  return `[session start · ${where} · thread id ${id}. Speak only with bin/discord-send ${id} … — nothing else reaches anyone. React with bin/discord-react ${id} <msg id> <emoji>. ` +
+    'The conductor is your continuous self across conversations: bin/conductor-read shows what it has been up to; bin/report tells it something worth remembering.]';
 }
 
 // Routing: DMs from known people; known people's messages in watched channels open a thread;
@@ -44,6 +49,10 @@ async function onMessage(msg) {
   if (isDM) {
     if (!q.identity.get(msg.author.id)) return; // unknown people can't open DM sessions (cost + safety); add them to identities
     threadKey = dmKey(msg.channelId); guildId = null; channelId = msg.channelId; model = DEFAULT_MODEL;
+  } else if (q.channel.get(msg.channelId)?.mode === 'conductor') {
+    // the conductor's own channel: known people talk to it directly, no thread
+    if (!q.identity.get(msg.author.id) || !conductor.ensure()) return;
+    threadKey = sessions.CONDUCTOR_KEY; guildId = msg.guildId; channelId = msg.channelId; model = conductor.ensure().model;
   } else if (msg.channel.isThread()) {
     const watched = q.channel.get(msg.channel.parentId);
     if (!watched && !mentioned && !q.thread.get(msg.channelId)) return;
@@ -65,13 +74,20 @@ async function onMessage(msg) {
   const h = header({ discordId: msg.author.id, displayName: msg.author.globalName || msg.author.username, guildId,
     guildName: msg.guild?.name, channelName: isDM ? null : (msg.channel.parent?.name || msg.channel.name), isDM });
   const item = { text: `${h.line}\n${lineFor(msg)}`, msgId: msg.id, mention: mentioned };
-  if (!sessions.isStarted(threadKey)) item.preface = preface(threadKey, msg, isDM, threadName);
+  if (!sessions.isStarted(threadKey)) {
+    item.preface = threadKey === sessions.CONDUCTOR_KEY ? conductor.preface() : preface(threadKey, msg, isDM, threadName);
+    if (sessions.isChat(threadKey)) {
+      conductor.notice('gateway', `${h.line.split(']')[0]}] opened a conversation: ${isDM ? 'DM' : `thread "${threadName}" in ${msg.guild.name}`} (id ${discordIdOf(threadKey)}). ` +
+        `First message: ${(msg.content || '').slice(0, 300)}`);
+    }
+  }
   enqueue(threadKey, item);
 }
 
 // Deliver messages that arrived while the bot was down.
 async function bootSweep() {
   for (const row of q.threads.all()) {
+    if (sessions.isJob(row.thread_key)) continue;
     const ch = await client.channels.fetch(discordIdOf(row.thread_key)).catch(() => null);
     if (!ch) { sessions.pruneThread(row.thread_key); continue; }
     if (ch.archived) continue;

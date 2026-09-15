@@ -5,6 +5,11 @@ import { randomUUID } from 'node:crypto';
 import { spawnThread } from './drivers/claude.mjs';
 import { db, q } from './db.mjs';
 import { LOG_DIR, WORKSPACES, ROOT, CLAUDE_BIN, CCR_BIN, IDLE_EVICT_MS } from './config.mjs';
+import { systemHeader } from './identity.mjs';
+
+export const CONDUCTOR_KEY = 'conductor';
+export const isJob = (key) => key.startsWith('job:');
+export const isChat = (key) => key !== CONDUCTOR_KEY && !isJob(key);
 
 // thread_key -> live Thread (driver). Everything durable is in the threads table.
 const live = new Map();
@@ -13,17 +18,25 @@ let notify = async () => {}; // (threadKey, text) => posts to Discord; set by ga
 
 export function onNotify(fn) { notify = fn; }
 
-export function workspaceFor(guildId) {
-  const dir = path.join(WORKSPACES, guildId || 'dm');
+export function workspaceFor(name) {
+  const dir = path.join(WORKSPACES, name);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(path.join(dir, '.claude'), { recursive: true });
-    for (const [link, target] of [['CLAUDE.md', '../../CLAUDE.md'], ['TEAM', '../../TEAM'], ['bin', '../../scripts'],
+    const claudeMd = name === CONDUCTOR_KEY ? '../../CONDUCTOR.md' : '../../CLAUDE.md';
+    for (const [link, target] of [['CLAUDE.md', claudeMd], ['TEAM', '../../TEAM'], ['bin', '../../scripts'],
       ['.claude/skills', '../../../skills']]) {
       const p = path.join(dir, link);
       if (!fs.existsSync(p)) fs.symlinkSync(target, p);
     }
   }
   return dir;
+}
+
+function cwdFor(row) {
+  const key = row.thread_key;
+  if (key === CONDUCTOR_KEY) return workspaceFor(CONDUCTOR_KEY);
+  if (isJob(key)) return q.job.get(key.slice(4))?.cwd || workspaceFor('jobs');
+  return workspaceFor(row.guild_id || 'dm');
 }
 
 export function ensureThread({ threadKey, guildId, channelId, model }) {
@@ -54,7 +67,7 @@ function logStream(threadKey) {
 function start(row) {
   const resume = sessionFileExists(row.session_uuid);
   const bin = /^gpt-|astra/.test(row.model) ? CCR_BIN : CLAUDE_BIN;
-  const thread = spawnThread(row.session_uuid, { model: row.model, cwd: workspaceFor(row.guild_id), bin, resume });
+  const thread = spawnThread(row.session_uuid, { model: row.model, cwd: cwdFor(row), bin, resume, env: { BENBOT_THREAD: row.thread_key } });
   const log = logStream(row.thread_key);
   const key = row.thread_key;
   thread.on('spawn', ({ pid, command }) => {
@@ -70,7 +83,7 @@ function start(row) {
   thread.on('stderr', (chunk) => log.write(JSON.stringify({ at: new Date().toISOString(), stderr: chunk.toString() }) + '\n'));
   thread.on('error', (err) => { if (!err.event) console.error(`[${key}] driver error:`, err.message); });
   thread.on('result', (e) => {
-    if (!e.is_error || e.terminal_reason === 'aborted_tools') return; // aborted_tools = our own interrupt
+    if (!e.is_error || /^aborted/.test(e.terminal_reason || '')) return; // aborted_* = our own interrupt
     const why = (e.result || e.errors?.join('; ') || e.subtype || 'unknown').split('\n').slice(0, 3).join(' ');
     notify(key, `⚠️ agent error (${e.terminal_reason || e.subtype}): ${why.slice(0, 400)}`).catch((x) => console.error('notify:', x.message));
   });
@@ -124,13 +137,37 @@ export async function evict(threadKey) {
   await thread.evict();
 }
 
+export function isBusy(threadKey) { return !!turn.get(threadKey)?.busy; }
+
+// Resolves on the live thread's next result event (the end of its current turn).
+function nextResult(threadKey, timeoutMs) {
+  const thread = live.get(threadKey);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { thread.off('result', done); reject(new Error(`no result within ${timeoutMs / 1000}s`)); }, timeoutMs);
+    const done = () => { clearTimeout(timer); resolve(); };
+    thread.once('result', done);
+  });
+}
+
+// Chat sessions hand off to the conductor on the way out; jobs already report and the conductor is the conductor.
+const evictionNote = () => `${systemHeader('idle eviction')}\nThis conversation is being put to sleep (it resumes on the next message). ` +
+  'Post a two-line summary of what happened here and anything still open to the conductor with `bin/report`, then stop. No reply in the thread.';
+
 export async function evictIdle() {
   const now = Date.now();
   for (const row of q.threads.all()) {
-    if (!live.has(row.thread_key)) continue;
+    const key = row.thread_key;
+    if (!live.has(key) || isBusy(key)) continue;
     if (now - row.last_activity < IDLE_EVICT_MS) continue;
-    console.log(`[${row.thread_key}] idle ${Math.round((now - row.last_activity) / 60000)}m — evicting`);
-    await evict(row.thread_key).catch((e) => console.error(`evict ${row.thread_key}:`, e.message));
+    console.log(`[${key}] idle ${Math.round((now - row.last_activity) / 60000)}m — evicting`);
+    if (isChat(key) && row.started) {
+      try {
+        const done = nextResult(key, 180_000);
+        await deliver(key, evictionNote());
+        await done;
+      } catch (e) { console.error(`[${key}] eviction summary failed:`, e.message); }
+    }
+    await evict(key).catch((e) => console.error(`evict ${key}:`, e.message));
   }
 }
 
