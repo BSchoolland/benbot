@@ -2,9 +2,11 @@ import { q } from './db.mjs';
 import { systemHeader } from './identity.mjs';
 import { enqueue } from './queue.mjs';
 import * as sessions from './sessions.mjs';
+import { loadJobs } from './jobfiles.mjs';
 
 // A job is a scheduled input to its own long-lived thread (job:<name>), never a fresh process.
 // Job sessions have no voice to humans; they report to the conductor with bin/report.
+// Definitions are read from jobs/*.md on every check, so edits apply without a restart.
 
 function fieldMatches(field, value, min) {
   return field.split(',').some((part) => {
@@ -35,7 +37,7 @@ export function tick(job) {
     item.preface = `[session start · you are BenBot's job "${job.name}" · nothing you write reaches a person. ` +
       'Report what matters with bin/report "<text>" (it goes to the conductor, who decides what Ben sees). Nothing changed = no report.]';
   }
-  q.jobRan.run(Date.now(), job.name);
+  q.jobRan.run(job.name, Date.now());
   enqueue(threadKey, item);
   console.log(`[${threadKey}] tick`);
 }
@@ -44,10 +46,13 @@ export function startScheduler() {
   const check = () => {
     const now = new Date();
     const minute = Math.floor(now.getTime() / 60_000);
-    for (const job of q.jobs.all()) {
-      if (job.run_now) { tick(job); continue; }
+    let jobs;
+    try { jobs = loadJobs(); } catch (e) { console.error('jobs:', e.message); return; }
+    for (const job of jobs) {
+      const st = q.jobState.get(job.name);
+      if (st?.run_now) { tick(job); continue; }
       if (!job.enabled) continue;
-      if (job.last_run_at && Math.floor(job.last_run_at / 60_000) === minute) continue;
+      if (st?.last_run_at && Math.floor(st.last_run_at / 60_000) === minute) continue;
       let due;
       try { due = cronMatches(job.cron, now); } catch (e) { console.error(`job ${job.name}:`, e.message); continue; }
       if (due) tick(job);

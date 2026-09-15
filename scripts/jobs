@@ -1,24 +1,31 @@
 #!/usr/bin/env node
-// Scheduled jobs: each is a recurring input to its own long-lived session (job:<name>).
+// Scheduled jobs: jobs/<name>.md in git (frontmatter cron/model/cwd/enabled, prompt as body).
+// Each is a recurring input to its own long-lived session (job:<name>).
 //   jobs list
-//   jobs add <name> "<cron>" <model> "<prompt>" [cwd]      (5-field crontab, local time)
-//   jobs rm|enable|disable <name>
-//   jobs run <name>                                         (tick it within seconds, via the running bot)
-import { db, q } from '../core/db.mjs';
-const [cmd, ...a] = process.argv.slice(2);
+//   jobs run <name>        tick it within seconds, via the running bot
+//   jobs new <name>        scaffold jobs/<name>.md, then edit it
+import fs from 'node:fs';
+import path from 'node:path';
+import { q } from '../core/db.mjs';
+import { loadJobs, JOBS_DIR } from '../core/jobfiles.mjs';
+const [cmd, name] = process.argv.slice(2);
 const run = {
   list() {
-    for (const j of q.jobs.all()) {
-      const last = j.last_run_at ? new Date(j.last_run_at).toISOString().slice(0, 16) : 'never';
+    for (const j of loadJobs()) {
+      const st = q.jobState.get(j.name);
+      const last = st?.last_run_at ? new Date(st.last_run_at).toISOString().slice(0, 16) : 'never';
       console.log(`${j.enabled ? '●' : '○'} ${j.name}  [${j.cron}]  ${j.model}  last ${last}  cwd ${j.cwd ?? '(jobs)'}\n    ${j.prompt.replace(/\s+/g, ' ').slice(0, 140)}`);
     }
   },
-  add: (name, cron, model, prompt, cwd = null) => db.prepare(`INSERT INTO jobs (name, cron, model, prompt, cwd, created_at) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(name) DO UPDATE SET cron=excluded.cron, model=excluded.model, prompt=excluded.prompt, cwd=excluded.cwd`).run(name, cron, model, prompt, cwd, Date.now()),
-  rm: (name) => db.prepare('DELETE FROM jobs WHERE name = ?').run(name),
-  enable: (name) => db.prepare('UPDATE jobs SET enabled = 1 WHERE name = ?').run(name),
-  disable: (name) => db.prepare('UPDATE jobs SET enabled = 0 WHERE name = ?').run(name),
-  run: (name) => db.prepare('UPDATE jobs SET run_now = 1 WHERE name = ?').run(name),
+  run(n) { if (!n) throw new Error('name?'); q.jobRunNow.run(n); console.log(`${n} will tick within seconds`); },
+  new(n) {
+    if (!n) throw new Error('name?');
+    const f = path.join(JOBS_DIR, `${n}.md`);
+    if (fs.existsSync(f)) throw new Error(`${f} exists`);
+    fs.mkdirSync(JOBS_DIR, { recursive: true });
+    fs.writeFileSync(f, `---\ncron: 0 9 * * *\nmodel: opus\n---\nWhat this job does, addressed to the session that will do it.\n`);
+    console.log(f);
+  },
 };
-if (!run[cmd] || a.some((x) => x === undefined)) { console.error('usage: see header of scripts/jobs'); process.exit(2); }
-const r = run[cmd](...a); if (r?.changes !== undefined) console.log(`${r.changes} row(s)`);
+if (!run[cmd]) { console.error('usage: see header of scripts/jobs'); process.exit(2); }
+try { run[cmd](name); } catch (e) { console.error(e.message); process.exit(1); }

@@ -28,16 +28,10 @@ CREATE TABLE IF NOT EXISTS identity_overrides (
 );
 CREATE TABLE IF NOT EXISTS defaults (kind TEXT PRIMARY KEY, note TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS jobs (
+CREATE TABLE IF NOT EXISTS job_state (  -- definitions are files in jobs/; this is only what the scheduler needs to remember
   name TEXT PRIMARY KEY,
-  cron TEXT NOT NULL,                   -- 5-field crontab expression, local time
-  model TEXT NOT NULL,
-  prompt TEXT NOT NULL,                 -- delivered to the job's thread on every tick
-  cwd TEXT,                             -- workspace for the job's session; null = workspaces/jobs
-  enabled INTEGER NOT NULL DEFAULT 1,
   run_now INTEGER NOT NULL DEFAULT 0,   -- set by scripts/jobs run; the scheduler ticks it within seconds
-  last_run_at INTEGER,
-  created_at INTEGER NOT NULL
+  last_run_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS inbox (      -- reports from sessions to the conductor (written by scripts/report)
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,9 +69,9 @@ export const q = {
   dflt: db.prepare('SELECT note FROM defaults WHERE kind = ?'),
   setting: db.prepare('SELECT value FROM settings WHERE key = ?'),
   setSetting: db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'),
-  job: db.prepare('SELECT * FROM jobs WHERE name = ?'),
-  jobs: db.prepare('SELECT * FROM jobs ORDER BY name'),
-  jobRan: db.prepare('UPDATE jobs SET last_run_at = ?, run_now = 0 WHERE name = ?'),
+  jobState: db.prepare('SELECT * FROM job_state WHERE name = ?'),
+  jobRan: db.prepare('INSERT INTO job_state (name, run_now, last_run_at) VALUES (?, 0, ?) ON CONFLICT(name) DO UPDATE SET run_now = 0, last_run_at = excluded.last_run_at'),
+  jobRunNow: db.prepare('INSERT INTO job_state (name, run_now) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET run_now = 1'),
   inboxPending: db.prepare('SELECT * FROM inbox WHERE delivered_at IS NULL ORDER BY id'),
   inboxDelivered: db.prepare('UPDATE inbox SET delivered_at = ? WHERE id = ?'),
 };

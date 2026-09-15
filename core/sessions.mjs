@@ -6,6 +6,7 @@ import { spawnThread } from './drivers/claude.mjs';
 import { db, q } from './db.mjs';
 import { LOG_DIR, WORKSPACES, ROOT, CLAUDE_BIN, CCR_BIN, IDLE_EVICT_MS } from './config.mjs';
 import { systemHeader } from './identity.mjs';
+import { loadJob } from './jobfiles.mjs';
 
 export const CONDUCTOR_KEY = 'conductor';
 export const isJob = (key) => key.startsWith('job:');
@@ -35,7 +36,7 @@ export function workspaceFor(name) {
 function cwdFor(row) {
   const key = row.thread_key;
   if (key === CONDUCTOR_KEY) return workspaceFor(CONDUCTOR_KEY);
-  if (isJob(key)) return q.job.get(key.slice(4))?.cwd || workspaceFor('jobs');
+  if (isJob(key)) return loadJob(key.slice(4))?.cwd || workspaceFor('jobs');
   return workspaceFor(row.guild_id || 'dm');
 }
 

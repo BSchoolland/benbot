@@ -16,8 +16,8 @@ Architecture (Ben's): **AGENT** (`claude`, via `core/drivers/claude.mjs`) · **C
 | `core/sessions.mjs` | Thread ↔ session table, spawn/resume/inject/interrupt/evict, idle eviction (50 min; chat sessions post a summary to the conductor first), per-thread event logs, ⚠️ error surfacing, orphan reaping on boot. |
 | `core/drivers/claude.mjs` | The verified runtime from the lab: spawn, `inject`, `interrupt`, `evict`, `resume`, events. |
 | `core/conductor.mjs` | The one privileged session (`conductor`, its own channel, `CONDUCTOR.md` as its CLAUDE.md). Receives job reports (`inbox` table, written by `scripts/report`), idle-eviction summaries and new-conversation notices; the only thing that posts to humans unprompted. |
-| `core/jobs.mjs` | Scheduler over the `jobs` table: a due job is a tick delivered into its own long-lived session `job:<name>`, never a fresh process. Job sessions report to the conductor. |
-| `core/db.mjs` / `state/state.db` | sqlite: `threads`, `channels`, `identities`, `identity_overrides`, `defaults`, `settings`, `jobs`, `inbox`. |
+| `core/jobs.mjs` / `core/jobfiles.mjs` | Scheduler over `jobs/*.md` (re-read every check, so edits apply live; `job_state` remembers last run): a due job is a tick delivered into its own long-lived session `job:<name>`, never a fresh process. Job sessions report to the conductor. |
+| `core/db.mjs` / `state/state.db` | sqlite: `threads`, `channels`, `identities`, `identity_overrides`, `defaults`, `settings`, `job_state`, `inbox`. |
 
 Rules the code relies on (measured in `~/Projects/excalibur-19-lab/FINDINGS.md`): results are correlated by
 `user_message_uuids`; an interrupt shows up as `is_error` + `terminal_reason: aborted_tools` and is not an error;
@@ -36,7 +36,7 @@ printf 'DISCORD_TOKEN=...\n' > .env            # AGENT_MODEL=fable, OWNER_IDS=..
 scripts/channels watch <channelId> <guildId> [model]   # which channels open threads
 scripts/identity set <discordId> <Name> "<note>"       # who may talk, and what they may ask
 scripts/channels conductor <channelId> <guildId> [model] # the conductor's channel (job reports show here; talk to it for debugging)
-scripts/jobs add <name> "<cron>" <model> "<prompt>" [cwd] # scheduled work; scripts/jobs list · run · enable · disable
+jobs/<name>.md                                         # scheduled work, in git: frontmatter cron/model/cwd/enabled, prompt as body; scripts/jobs list · run · new
 cp benbot.service ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now benbot
 ```
 Bot needs the Message Content and Server Members intents and permission to create/manage threads and add reactions.
