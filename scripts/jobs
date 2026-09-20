@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Scheduled jobs: jobs/<name>.md in git (frontmatter cron/model/cwd/enabled, prompt as body).
+// Scheduled jobs: jobs/<name>.md, gitignored (frontmatter cron/model/cwd/enabled, prompt as body).
 // Each is a recurring input to its own long-lived session (job:<name>).
 //   jobs list
 //   jobs run <name>        tick it within seconds, via the running bot

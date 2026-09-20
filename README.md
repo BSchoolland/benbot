@@ -36,7 +36,7 @@ printf 'DISCORD_TOKEN=...\n' > .env            # AGENT_MODEL=fable, OWNER_IDS=..
 scripts/channels watch <channelId> <guildId> [model]   # which channels open threads
 scripts/identity set <discordId> <Name> "<note>"       # who may talk, and what they may ask
 scripts/channels conductor <channelId> <guildId> [model] # the conductor's channel (job reports show here; talk to it for debugging)
-jobs/<name>.md                                         # scheduled work, in git: frontmatter cron/model/cwd/enabled, prompt as body; scripts/jobs list · run · new
+jobs/<name>.md                                         # scheduled work, gitignored: frontmatter cron/model/cwd/enabled, prompt as body; scripts/jobs list · run · new
 cp benbot.service ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now benbot
 ```
 Bot needs the Message Content and Server Members intents and permission to create/manage threads and add reactions.

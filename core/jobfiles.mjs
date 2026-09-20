@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT } from './config.mjs';
 
-// Job definitions live in git: jobs/<name>.md with a small frontmatter and the prompt as the body.
+// Job definitions: jobs/<name>.md (gitignored; prompts can point at private things) with a small frontmatter and the prompt as the body.
 export const JOBS_DIR = path.join(ROOT, 'jobs');
 
 export function loadJob(name) {
