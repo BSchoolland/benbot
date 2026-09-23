@@ -6,7 +6,7 @@
 //   jobs new <name>        scaffold jobs/<name>.md, then edit it
 import fs from 'node:fs';
 import path from 'node:path';
-import { q } from '../core/db.mjs';
+import { q, db } from '../core/db.mjs';
 import { loadJobs, JOBS_DIR } from '../core/jobfiles.mjs';
 const [cmd, name] = process.argv.slice(2);
 const run = {
@@ -29,3 +29,6 @@ const run = {
 };
 if (!run[cmd]) { console.error('usage: see header of scripts/jobs'); process.exit(2); }
 try { run[cmd](name); } catch (e) { console.error(e.message); process.exit(1); }
+// Node 24 segfaults in v8 teardown with the better-sqlite3 handle still open; close it and leave explicitly.
+db.close();
+process.exit(0);
