@@ -1,10 +1,11 @@
 import { Client, GatewayIntentBits, Partials, Events, ChannelType } from 'discord.js';
 import { TOKEN, DEFAULT_MODEL } from './config.mjs';
 import { q } from './db.mjs';
-import { header } from './identity.mjs';
+import { header, systemHeader } from './identity.mjs';
 import { enqueue } from './queue.mjs';
 import * as sessions from './sessions.mjs';
 import * as conductor from './conductor.mjs';
+import * as secrets from './secrets.mjs';
 
 export const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent,
@@ -49,6 +50,16 @@ async function onMessage(msg) {
   if (isDM) {
     if (!q.identity.get(msg.author.id)) return; // unknown people can't open DM sessions (cost + safety); add them to identities
     threadKey = dmKey(msg.channelId); guildId = null; channelId = msg.channelId; model = DEFAULT_MODEL;
+  } else if (q.channel.get(msg.channelId)?.mode === 'sms') {
+    // Ben's forwarded texts ("From <sender>: <body>"). A reply to a text a session sent (scripts/text) wakes that
+    // session; everything else just sits here for bin/sms.
+    const m = (msg.content || '').match(/^From\s+(.+?):\s*([\s\S]*)$/);
+    const digits = m ? m[1].replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '') : '';
+    const pending = digits ? q.textPending.get(digits) : null;
+    if (pending && q.thread.get(pending.thread_key)) {
+      enqueue(pending.thread_key, { text: `${systemHeader('sms reply')}\nReply from ${m[1].trim()}: ${m[2].trim().slice(0, 1500)}` });
+    }
+    return;
   } else if (q.channel.get(msg.channelId)?.mode === 'conductor') {
     // the conductor's own channel: known people talk to it directly, no thread
     if (!q.identity.get(msg.author.id) || !conductor.ensure()) return;
@@ -102,6 +113,7 @@ async function bootSweep() {
 
 export async function startGateway() {
   client.on(Events.MessageCreate, (m) => onMessage(m).catch((e) => console.error('onMessage:', e)));
+  client.on(Events.InteractionCreate, (i) => secrets.handleInteraction(i).catch((e) => console.error('interaction:', e)));
   client.once(Events.ClientReady, async () => {
     console.log(`BenBot online as ${client.user.tag}; watching ${q.channels.all().length} channel(s), ${client.guilds.cache.size} server(s)`);
     await bootSweep().catch((e) => console.error('bootSweep:', e));

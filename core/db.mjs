@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS identity_overrides (
 );
 CREATE TABLE IF NOT EXISTS defaults (kind TEXT PRIMARY KEY, note TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS texts_pending (   -- outbound texts (scripts/text) whose reply should wake the sending session
+  number TEXT PRIMARY KEY,                   -- digits only
+  thread_key TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS job_state (  -- definitions are files in jobs/; this is only what the scheduler needs to remember
   name TEXT PRIMARY KEY,
   run_now INTEGER NOT NULL DEFAULT 0,   -- set by scripts/jobs run; the scheduler ticks it within seconds
@@ -42,7 +47,7 @@ CREATE TABLE IF NOT EXISTS inbox (      -- reports from sessions to the conducto
 );
 `);
 if (!db.prepare("PRAGMA table_info(channels)").all().some((c) => c.name === 'mode')) {
-  db.exec("ALTER TABLE channels ADD COLUMN mode TEXT NOT NULL DEFAULT 'threads'"); // threads | conductor
+  db.exec("ALTER TABLE channels ADD COLUMN mode TEXT NOT NULL DEFAULT 'threads'"); // threads | conductor | sms
 }
 
 const seed = db.prepare('INSERT OR IGNORE INTO defaults (kind, note) VALUES (?, ?)');
@@ -68,6 +73,9 @@ export const q = {
   override: db.prepare('SELECT note FROM identity_overrides WHERE discord_id = ? AND guild_id = ?'),
   dflt: db.prepare('SELECT note FROM defaults WHERE kind = ?'),
   setting: db.prepare('SELECT value FROM settings WHERE key = ?'),
+  textPending: db.prepare('SELECT * FROM texts_pending WHERE number = ?'),
+  textsPending: db.prepare('SELECT * FROM texts_pending'),
+  setTextPending: db.prepare('INSERT INTO texts_pending (number, thread_key, created_at) VALUES (?, ?, ?) ON CONFLICT(number) DO UPDATE SET thread_key=excluded.thread_key, created_at=excluded.created_at'),
   setSetting: db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'),
   jobState: db.prepare('SELECT * FROM job_state WHERE name = ?'),
   jobRan: db.prepare('INSERT INTO job_state (name, run_now, last_run_at) VALUES (?, 0, ?) ON CONFLICT(name) DO UPDATE SET run_now = 0, last_run_at = excluded.last_run_at'),

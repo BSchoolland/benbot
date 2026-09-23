@@ -1,0 +1,37 @@
+#!/usr/bin/env node
+// Send a text from Ben's phone. Usage: text <number> <message...>   |   echo "msg" | text <number> -
+// Emails Ben (subject "Phone Trigger", body "<marker>+1<number>|<message>"); a Mail-triggered Shortcut on his phone
+// sends the text. Also posts the line to #texts-out as the audit trail. No spaces, so the phone needs no trimming. (marker = settings.texts_out_marker, known only to Ben's phone); a Shortcut on Ben's phone sends it. Keep it under 200 chars
+// (the phone only sees the notification preview). The reply, if any, wakes this session as an "sms reply" input;
+// bin/sms shows the raw texts.
+import fs from 'node:fs';
+import { q } from '../core/db.mjs';
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+const [num, ...rest] = process.argv.slice(2);
+const digits = (num || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+if (digits.length !== 10) { console.error('usage: text <10-digit US number> <message>'); process.exit(2); }
+const body = (rest[0] === '-' ? fs.readFileSync(0, 'utf8') : rest.join(' ')).trim().replace(/\s*\n\s*/g, ' ');
+if (!body) { console.error('text: empty message'); process.exit(2); }
+if (body.length > 200) { console.error(`text: ${body.length} chars; keep it under 200 or the phone gets a truncated preview`); process.exit(2); }
+if (body.includes('|')) { console.error('text: message may not contain "|" (the phone splits on it)'); process.exit(2); }
+const channel = q.setting.get('texts_out_channel')?.value;
+if (!channel) { console.error('text: settings.texts_out_channel not set'); process.exit(2); }
+const marker = q.setting.get('texts_out_marker')?.value;
+if (!marker) { console.error('text: settings.texts_out_marker not set'); process.exit(2); }
+const thread = process.env.BENBOT_THREAD || 'unknown';
+q.setTextPending.run(digits, thread, Date.now());
+const line = `${marker}+1${digits}|${body}`;
+await gmailSend('bschoolland@gmail.com', 'Phone Trigger', line);
+const id = execFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), 'discord-send'), [channel, line], { encoding: 'utf8' }).trim();
+console.log(`emailed the phone trigger; audit (msg ${id}); reply from +1${digits} will wake ${thread}`);
+
+async function gmailSend(to, subject, text) {
+  const env = Object.fromEntries(fs.readFileSync(`${process.env.HOME}/.budget/google-oauth.env`, 'utf8').split('\n').filter((l) => l.includes('=')).map((l) => l.trim().split('=', 2)));
+  const tok = await (await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: env.GOOGLE_OAUTH_CLIENT_ID, client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET, refresh_token: env.GOOGLE_OAUTH_REFRESH_TOKEN, grant_type: 'refresh_token' }) })).json();
+  if (!tok.access_token) throw new Error(`gmail token: ${JSON.stringify(tok)}`);
+  const raw = Buffer.from(`To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${text}\r\n`).toString('base64url');
+  const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', { method: 'POST', headers: { authorization: `Bearer ${tok.access_token}`, 'content-type': 'application/json' }, body: JSON.stringify({ raw }) });
+  if (!r.ok) throw new Error(`gmail send ${r.status}: ${(await r.text()).slice(0, 300)}`);
+}
