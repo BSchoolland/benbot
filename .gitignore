@@ -4,3 +4,4 @@ state/
 workspaces/
 TEAM/
 jobs/
+__pycache__/

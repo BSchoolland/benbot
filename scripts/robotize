@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Robot voice via the WORLD speech vocoder. Reads any audio on stdin, writes
+48kHz stereo s16le on stdout (what the bot's [pipe:...] hook expects).
+
+  robotize [--pitch HZ] [--buzz 0..1] [--formant F] [--mode world|phase] [--mix 0..1]
+
+world (default): WORLD decomposes speech into pitch, spectral envelope and
+  breathiness, then resynthesises with a flat pitch. Formants (the words) are
+  untouched; only the melody of the voice is replaced by a machine drone.
+  --buzz 1 also forces every frame voiced, so consonants buzz too.
+  --formant <1 shifts formants down (bigger machine), >1 up (smaller).
+phase: classic phase-zeroing robotizer (STFT magnitudes resynthesised with
+  zero phase). Harsher, more metallic; --pitch sets the buzz rate.
+"""
+import argparse, subprocess, sys
+import numpy as np
+
+RATE = 48000
+
+ap = argparse.ArgumentParser()
+ap.add_argument('--mode', choices=['world', 'phase'], default='world')
+ap.add_argument('--pitch', type=float, default=100.0)
+ap.add_argument('--buzz', type=float, default=0.0, help='0 = keep natural breathiness, 1 = fully voiced')
+ap.add_argument('--formant', type=float, default=1.0)
+ap.add_argument('--mix', type=float, default=1.0)
+args = ap.parse_args()
+
+dec = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
+                      '-f', 'f64le', '-ac', '1', '-ar', str(RATE), 'pipe:1'],
+                     input=sys.stdin.buffer.read(), capture_output=True)
+if dec.returncode:
+    sys.stderr.write(dec.stderr.decode()); sys.exit(dec.returncode)
+x = np.frombuffer(dec.stdout, dtype=np.float64).copy()
+if len(x) == 0:
+    sys.exit(0)
+
+
+def world(x):
+    import pyworld as pw
+    f0, t = pw.dio(x, RATE, f0_floor=60.0, f0_ceil=500.0, frame_period=5.0)
+    f0 = pw.stonemask(x, f0, t, RATE)
+    sp = pw.cheaptrick(x, f0, t, RATE)
+    apr = pw.d4c(x, f0, t, RATE)
+    voiced = f0 > 0
+    if args.buzz >= 1:
+        f0 = np.full_like(f0, args.pitch)
+        apr = np.zeros_like(apr)
+    else:
+        f0 = np.where(voiced, args.pitch, 0.0)
+        apr = apr * (1 - args.buzz)
+    if args.formant != 1.0:
+        n = sp.shape[1]
+        src = np.arange(n) / args.formant
+        sp = np.stack([np.interp(src, np.arange(n), row, right=row[-1]) for row in sp])
+    return pw.synthesize(f0, np.ascontiguousarray(sp), np.ascontiguousarray(apr), RATE, frame_period=5.0)
+
+
+def phase(x):
+    frame = 2048
+    hop = max(32, int(round(RATE / args.pitch)))
+    win = np.hanning(frame)
+    pad = np.concatenate([np.zeros(frame), x, np.zeros(frame)])
+    out = np.zeros_like(pad)
+    norm = np.zeros_like(pad)
+    for i in range(0, len(pad) - frame, hop):
+        mag = np.abs(np.fft.rfft(pad[i:i + frame] * win))
+        out[i:i + frame] += np.fft.fftshift(np.fft.irfft(mag, n=frame)) * win
+        norm[i:i + frame] += win * win
+    return (out / np.maximum(norm, 1e-3))[frame:frame + len(x)]
+
+
+y = world(x) if args.mode == 'world' else phase(x)
+y = y[:len(x)] if len(y) >= len(x) else np.concatenate([y, np.zeros(len(x) - len(y))])
+y *= np.max(np.abs(x)) / max(np.max(np.abs(y)), 1e-9)
+y = args.mix * y + (1 - args.mix) * x
+pcm = np.clip(y * 32767, -32768, 32767).astype('<i2')
+try:
+    sys.stdout.buffer.write(np.repeat(pcm, 2).tobytes())
+except BrokenPipeError:  # playback was interrupted; nothing left to say
+    pass

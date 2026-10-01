@@ -29,6 +29,10 @@ export const CLAUDE_BIN = env.CLAUDE_BIN || path.join(os.homedir(), '.local', 'b
 export const CCR_BIN = env.CCR_BIN || path.join(os.homedir(), 'Projects', 'claude-router', 'bin', 'ccr');
 export const DEBOUNCE_MS = Number(env.DEBOUNCE_MS || 1500);
 export const IDLE_EVICT_MS = Number(env.IDLE_EVICT_MS || 50 * 60 * 1000);
+export const OPENAI_API_KEY = env.OPENAI_API_KEY || '';      // empty = voice mode off
+export const VOICE_CHANNEL_ID = env.VOICE_CHANNEL_ID || '';  // empty = any voice channel an owner joins
+export const VOICE_MODEL = env.VOICE_MODEL || '';            // voice threads start on this model/effort (empty = channel model)
+export const VOICE_EFFORT = env.VOICE_EFFORT || '';
 
 fs.mkdirSync(LOG_DIR, { recursive: true });
 fs.mkdirSync(WORKSPACES, { recursive: true });
