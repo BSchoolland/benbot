@@ -1,5 +1,5 @@
 import { q, setting } from './db.mjs';
-import { reportHeader, systemHeader } from './identity.mjs';
+import { briefHeader, reportHeader, systemHeader } from './identity.mjs';
 import { enqueue } from './queue.mjs';
 import * as sessions from './sessions.mjs';
 
@@ -18,8 +18,8 @@ export function ensure() {
 }
 
 export function preface() {
-  return `[session start · you are the conductor · your channel is ${channelId()}. Speak only with bin/discord-send <channel or thread id> …; ` +
-    `bin/discord-send ${channelId()} … is your own channel, for debugging talk with Ben.]`;
+  return `[session start · you are the conductor · your channel is ${channelId()}. Speak only with discord-send <channel or thread id> …; ` +
+    `discord-send ${channelId()} … is your own channel, for debugging talk with Ben.]`;
 }
 
 export function deliver(header, text) {
@@ -33,8 +33,9 @@ export function notice(source, text) { deliver(systemHeader(source), text); }
 
 export function drainInbox() {
   for (const row of q.inboxPending.all()) {
-    deliver(reportHeader(row.source), row.text);
+    if (row.target) enqueue(row.target, { text: `${briefHeader()}\n${row.text}` });
+    else deliver(reportHeader(row.source), row.text);
     q.inboxDelivered.run(Date.now(), row.id);
-    mirror(`📥 **${row.source}**\n${row.text}`).catch((e) => console.error('conductor mirror:', e.message));
+    mirror(row.target ? `📤 **brief → ${row.target}**\n${row.text}` : `📥 **${row.source}**\n${row.text}`).catch((e) => console.error('conductor mirror:', e.message));
   }
 }

@@ -16,6 +16,8 @@ Architecture (Ben's): **AGENT** (`claude`, via `core/drivers/claude.mjs`) · **C
 | `core/sessions.mjs` | Thread ↔ session table, spawn/resume/inject/interrupt/evict, idle eviction (50 min; chat sessions post a summary to the conductor first), per-thread event logs, ⚠️ error surfacing, orphan reaping on boot. |
 | `core/drivers/claude.mjs` | The verified runtime from the lab: spawn, `inject`, `interrupt`, `evict`, `resume`, events. |
 | `core/conductor.mjs` | The one privileged session (`conductor`, its own channel, `CONDUCTOR.md` as its CLAUDE.md). Receives job reports (`inbox` table, written by `scripts/report`), idle-eviction summaries and new-conversation notices; the only thing that posts to humans unprompted. |
+| `core/voice.mjs` | An owner joining a voice channel opens a voice-bound thread under the guild's watched channel; utterances are transcribed (OpenAI STT) and delivered like typed messages; `scripts/discord-send` speaks replies (TTS in `scripts/voice_tts.py`) into `state/voice/<thread>/`, which the bot plays. Off without `OPENAI_API_KEY`. |
+| `core/wakes.mjs` | One-shot watchers from `scripts/discord-wake` (`wakes` table): when a file appears or a pid exits, a `[wake]` line is delivered into the thread's session, live or asleep. |
 | `core/jobs.mjs` / `core/jobfiles.mjs` | Scheduler over `jobs/*.md` (re-read every check, so edits apply live; `job_state` remembers last run): a due job is a tick delivered into its own long-lived session `job:<name>`, never a fresh process. Job sessions report to the conductor. |
 | `core/db.mjs` / `state/state.db` | sqlite: `threads`, `channels`, `identities`, `identity_overrides`, `defaults`, `settings`, `job_state`, `inbox`. |
 
@@ -46,9 +48,16 @@ Bot needs the Message Content and Server Members intents and permission to creat
 journalctl --user -u benbot -f          # bot log
 state/logs/<threadKey>.jsonl            # every stream-json event of that session
 scripts/identity list · scripts/channels list · scripts/jobs list · scripts/conductor-read
+scripts/discord-model <thread> <model> [effort]   # next turn runs under new flags, same session (threads.model/effort)
+scripts/discord-wake · discord-rename · discord-search · usage-limits · codex-limits   # the agent's other hands; see CLAUDE.md
 ```
 Reset one conversation: `sqlite3 state/state.db "delete from threads where thread_key='<id>'"`.
 Restarting the bot SIGTERMs live agents (a child's stdin can't be re-attached); conversations resume on the next message.
 
+## Skills and shared code
+`skills/` is linked into every workspace as `.claude/skills`. `services/` links to code shared with the older Ducktape
+bot (`~/Projects/evergreen/services/{budget,google}`: the logged-in Chrome driver and Google OAuth helper the
+`browse-as-ben`, `google-access` and `printer` skills use); workspaces get a `services` symlink too.
+
 ## Not in v0
-Cron/scheduled inputs, voice, wakes, memory beyond grep, the codex driver, evergreen's DevOps skills.
+Memory beyond grep, the codex driver, evergreen's DevOps skills.

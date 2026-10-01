@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+// Conductor → a thread's agent, privately. Usage: brief <thread id> "<text>"  |  echo "text" | brief <thread id> -
+import fs from 'node:fs';
+import { db } from '../core/db.mjs';
+const [target, ...rest] = process.argv.slice(2);
+const text = (rest[0] === '-' ? fs.readFileSync(0, 'utf8') : rest.join(' ')).trim();
+if (!target || !text) { console.error('usage: brief <thread id> "<text>" | brief <thread id> -'); process.exit(2); }
+if (!db.prepare('SELECT 1 FROM threads WHERE thread_key = ?').get(target)) { console.error(`brief: no conversation ${target}`); process.exit(1); }
+db.prepare('INSERT INTO inbox (source, target, text, created_at) VALUES (?, ?, ?, ?)').run(process.env.BENBOT_THREAD || 'conductor', target, text, Date.now());
+console.log(`briefed ${target}`);
