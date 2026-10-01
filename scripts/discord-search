@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Search the real Discord history, fetched from the Discord API (not the bot DB).
+
+On each run the tool incrementally syncs every channel and thread the bot can
+see into a local archive (discord_archive.db), then searches that. The first
+run backfills the full server history; later runs only fetch what's new.
+
+Examples:
+  discord-search "docker cve"                # full-text search, newest first
+  discord-search --author kirill --days 14   # filters work with or without a query
+  discord-search --around 27                 # conversation surrounding row id 27
+
+Each result line starts with its row id — pass it to --around to read the
+surrounding discussion.
+"""
+
+import argparse
+import json
+import sqlite3
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = ROOT / "state" / "discord_archive.db"
+ENV_PATHS = [ROOT / ".env"]
+API = "https://discord.com/api/v10"
+SYNC_IF_OLDER_THAN = 600  # seconds between automatic syncs; --sync / --no-sync override
+
+TEXT_CHANNEL_TYPES = (0, 5)           # guild text, announcement
+THREAD_PARENT_TYPES = (0, 5, 15, 16)  # + forum, media
+
+
+def bot_token():
+    for path in ENV_PATHS:
+        if not path.exists():
+            continue
+        for line in path.read_text().splitlines():
+            if line.startswith("DISCORD_TOKEN="):
+                return line.split("=", 1)[1].strip().strip("\"'")
+    sys.exit("DISCORD_TOKEN not found")
+
+
+def api_get(path, tok):
+    req = urllib.request.Request(API + path, headers={
+        "Authorization": f"Bot {tok}",
+        "User-Agent": "BenBot (discord-search)",
+    })
+    for _ in range(6):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                time.sleep(float(json.load(e).get("retry_after", 1)) + 0.1)
+                continue
+            if e.code in (403, 404):
+                return None  # channel the bot can't read
+            raise
+    return None
+
+
+def snowflake_ts(sid):
+    return ((int(sid) >> 22) + 1420070400000) // 1000
+
+
+def connect():
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT UNIQUE NOT NULL,
+            channel_id TEXT NOT NULL,
+            channel_name TEXT,
+            author_id TEXT,
+            author_name TEXT,
+            is_bot INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            content TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(created_at);
+        CREATE INDEX IF NOT EXISTS idx_messages_chan ON messages(channel_id, created_at);
+        CREATE TABLE IF NOT EXISTS sync_state (
+            channel_id TEXT PRIMARY KEY,
+            last_message_id TEXT
+        );
+        CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+            USING fts5(content, content='messages', content_rowid='id');
+        CREATE TRIGGER IF NOT EXISTS messages_fts_ai
+            AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content); END;
+        """
+    )
+    return conn
+
+
+def render_content(m):
+    parts = [m.get("content") or ""]
+    for a in m.get("attachments", []):
+        parts.append(f"[attachment: {a.get('filename', '?')}]")
+    for e in m.get("embeds", []):
+        for key in ("title", "description"):
+            if e.get(key):
+                parts.append(e[key])
+    return " ".join(p for p in parts if p).strip()
+
+
+def sync(conn, verbose=False):
+    tok = bot_token()
+    fetched = 0
+    for g in api_get("/users/@me/guilds", tok) or []:
+        chans = api_get(f"/guilds/{g['id']}/channels", tok) or []
+        threads = (api_get(f"/guilds/{g['id']}/threads/active", tok) or {}).get("threads", [])
+        for c in chans:
+            if c["type"] in THREAD_PARENT_TYPES:
+                arch = api_get(f"/channels/{c['id']}/threads/archived/public", tok)
+                threads.extend((arch or {}).get("threads", []))
+        targets = [c for c in chans if c["type"] in TEXT_CHANNEL_TYPES] + threads
+        seen = set()
+        for c in targets:
+            if c["id"] in seen:
+                continue
+            seen.add(c["id"])
+            row = conn.execute(
+                "SELECT last_message_id FROM sync_state WHERE channel_id = ?", (c["id"],)
+            ).fetchone()
+            after = row["last_message_id"] if row else "0"
+            while True:
+                batch = api_get(f"/channels/{c['id']}/messages?after={after}&limit=100", tok)
+                if not batch:
+                    break
+                batch.sort(key=lambda m: int(m["id"]))
+                for m in batch:
+                    content = render_content(m)
+                    if content:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO messages (message_id, channel_id, channel_name,"
+                            " author_id, author_name, is_bot, created_at, content)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                m["id"], c["id"], c.get("name"),
+                                m["author"].get("id"),
+                                m["author"].get("global_name") or m["author"].get("username"),
+                                1 if m["author"].get("bot") else 0,
+                                snowflake_ts(m["id"]), content,
+                            ),
+                        )
+                        fetched += 1
+                after = batch[-1]["id"]
+                conn.execute(
+                    "INSERT OR REPLACE INTO sync_state (channel_id, last_message_id) VALUES (?, ?)",
+                    (c["id"], after),
+                )
+                conn.commit()
+                if len(batch) < 100:
+                    break
+            if verbose:
+                print(f"  synced #{c.get('name', c['id'])}", file=sys.stderr)
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)",
+        (str(int(time.time())),),
+    )
+    conn.commit()
+    if verbose:
+        print(f"  {fetched} new messages archived", file=sys.stderr)
+
+
+def maybe_sync(conn, args):
+    if args.no_sync:
+        return
+    row = conn.execute("SELECT value FROM meta WHERE key = 'last_sync'").fetchone()
+    if args.sync or not row or time.time() - int(row["value"]) > SYNC_IF_OLDER_THAN:
+        if not row:
+            print("first run: backfilling full server history, this can take a couple minutes…",
+                  file=sys.stderr)
+        sync(conn, verbose=args.sync or not row)
+
+
+def fmt(row, full=False, mark=False):
+    ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["created_at"]))
+    who = (row["author_name"] or "?") + (" [bot]" if row["is_bot"] else "")
+    content = row["content"].replace("\n", " ⏎ ")
+    if not full and len(content) > 240:
+        content = content[:240] + "…"
+    prefix = ">> " if mark else ""
+    return f"{prefix}[{row['id']}] {ts} #{row['channel_name'] or row['channel_id']} {who}: {content}"
+
+
+def build_filters(args):
+    where, params = [], []
+    if args.author:
+        where.append("(m.author_name LIKE ? OR m.author_id = ?)")
+        params += [f"%{args.author}%", args.author]
+    if args.channel:
+        where.append("(m.channel_id = ? OR m.channel_name LIKE ?)")
+        params += [args.channel, f"%{args.channel}%"]
+    if args.days:
+        where.append("m.created_at > ?")
+        params.append(int(time.time()) - args.days * 86400)
+    return where, params
+
+
+def search(conn, args):
+    where, params = build_filters(args)
+    if args.query:
+        sql = (
+            "SELECT m.* FROM messages m "
+            "JOIN messages_fts f ON f.rowid = m.id "
+            "WHERE messages_fts MATCH ?"
+        )
+        for q in (args.query, " ".join('"%s"' % t.replace('"', "") for t in args.query.split())):
+            try:
+                return conn.execute(
+                    sql + "".join(" AND " + w for w in where) + " ORDER BY m.created_at DESC LIMIT ?",
+                    [q] + params + [args.limit],
+                ).fetchall()
+            except sqlite3.OperationalError:
+                continue  # raw FTS syntax choked — retry with every term quoted
+        return []
+    sql = "SELECT m.* FROM messages m"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return conn.execute(sql + " ORDER BY m.created_at DESC LIMIT ?", params + [args.limit]).fetchall()
+
+
+def around(conn, row_id, span=15):
+    anchor = conn.execute("SELECT * FROM messages WHERE id = ?", (row_id,)).fetchone()
+    if not anchor:
+        sys.exit(f"no message with row id {row_id}")
+    chan, ts = anchor["channel_id"], anchor["created_at"]
+    before = conn.execute(
+        "SELECT * FROM messages WHERE channel_id = ? AND (created_at < ? OR (created_at = ? AND id < ?)) "
+        "ORDER BY created_at DESC, id DESC LIMIT ?", (chan, ts, ts, row_id, span)).fetchall()
+    after = conn.execute(
+        "SELECT * FROM messages WHERE channel_id = ? AND (created_at > ? OR (created_at = ? AND id > ?)) "
+        "ORDER BY created_at ASC, id ASC LIMIT ?", (chan, ts, ts, row_id, span)).fetchall()
+    return list(reversed(before)) + [anchor] + after
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("query", nargs="?", help="full-text query (FTS5 syntax; quoted-term fallback)")
+    ap.add_argument("--author", help="filter by author name (substring) or Discord id")
+    ap.add_argument("--channel", help="filter by channel id or name (substring)")
+    ap.add_argument("--days", type=int, help="only the last N days")
+    ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--around", type=int, metavar="ROW_ID", help="show the conversation around this row id")
+    ap.add_argument("--full", action="store_true", help="don't truncate message content")
+    ap.add_argument("--sync", action="store_true", help="force a sync now")
+    ap.add_argument("--no-sync", action="store_true", help="search the local archive without syncing")
+    args = ap.parse_args()
+
+    conn = connect()
+    maybe_sync(conn, args)
+    if args.around:
+        for r in around(conn, args.around):
+            print(fmt(r, full=args.full, mark=(r["id"] == args.around)))
+    else:
+        rows = search(conn, args)
+        if not rows:
+            print("(no matches)")
+        for r in reversed(rows):  # print oldest-first for readability
+            print(fmt(r, full=args.full))
+
+
+if __name__ == "__main__":
+    main()

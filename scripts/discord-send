@@ -4,9 +4,16 @@
 Usage: discord-send <channel_or_thread_id> <message...>
        echo "long message" | discord-send <channel_or_thread_id> -
        discord-send <channel_or_thread_id> --file <path> [<path>...] [-- <message...>]
-Splits into <=1900-char chunks on line boundaries. Prints the message id(s)."""
+Splits into <=1900-char chunks on line boundaries. Prints the message id(s).
+
+In a voice-bound thread (the bot keeps state/voice/<thread_id>/ while it is on the call) the message is also
+spoken: leading [voice:]/[style:]/[fx:]/[pipe:] tags are stripped from the posted text and applied to the audio
+(see voice_tts.py). Messages starting with 🎙 are posted silently."""
 import json, mimetypes, sys, time, urllib.error, urllib.request, uuid
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import voice_tts  # noqa: E402
 
 ENV = Path(__file__).resolve().parent.parent / ".env"
 API = "https://discord.com/api/v10"
@@ -66,8 +73,13 @@ def main():
         text = " ".join(rest[rest.index("--") + 1 :]) if "--" in rest else ""
         if not files: sys.exit("discord-send: --file needs at least one path")
         print(post(cid, text, files)); return
-    text = sys.stdin.read() if sys.argv[2] == "-" else " ".join(sys.argv[2:])
+    raw = text = sys.stdin.read() if sys.argv[2] == "-" else " ".join(sys.argv[2:])
     if not text.strip(): sys.exit("discord-send: empty message")
+    spoken = voice_tts.is_voice_thread(cid) and not text.lstrip().startswith("🎙")
+    if spoken: text, _ = voice_tts.parse_tags(text)
     for c in chunks(text): print(post(cid, c))
+    if spoken:
+        try: voice_tts.speak(cid, raw)
+        except RuntimeError as e: sys.exit(f"posted, but could not speak it: {e}")
 
 if __name__ == "__main__": main()

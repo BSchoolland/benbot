@@ -5,6 +5,6 @@ import sqlite3, subprocess, sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 row = sqlite3.connect(ROOT / "state" / "state.db").execute("SELECT channel_id FROM channels WHERE mode = 'sms'").fetchone()
-if not row: sys.exit("sms: no channel registered (bin/channels sms <channel_id> <guild_id>)")
+if not row: sys.exit("sms: no channel registered (channels sms <channel_id> <guild_id>)")
 limit = sys.argv[sys.argv.index("--limit") + 1] if "--limit" in sys.argv else "10"
 sys.exit(subprocess.call([str(ROOT / "scripts" / "discord-read"), row[0], "--limit", limit]))

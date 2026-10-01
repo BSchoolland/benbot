@@ -3,7 +3,7 @@
 // Emails Ben (subject "Phone Trigger", body "<marker>+1<number>|<message>"); a Mail-triggered Shortcut on his phone
 // sends the text. Also posts the line to #texts-out as the audit trail. No spaces, so the phone needs no trimming. (marker = settings.texts_out_marker, known only to Ben's phone); a Shortcut on Ben's phone sends it. Keep it under 200 chars
 // (the phone only sees the notification preview). The reply, if any, wakes this session as an "sms reply" input;
-// bin/sms shows the raw texts.
+// sms shows the raw texts.
 import fs from 'node:fs';
 import { q } from '../core/db.mjs';
 import { execFileSync } from 'node:child_process';

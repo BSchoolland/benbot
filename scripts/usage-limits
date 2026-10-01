@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Print Ben's Claude subscription limit utilization: 5-hour session, weekly all-models,
+weekly Fable. Usage: usage-limits [--json]. Ben measures cost in these, never dollars."""
+import json, sys, urllib.request
+from datetime import datetime, timezone
+
+tok = json.load(open("/home/ben/.claude/.credentials.json"))["claudeAiOauth"]["accessToken"]
+req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage",
+    headers={"Authorization": "Bearer " + tok, "anthropic-beta": "oauth-2025-04-20"})
+with urllib.request.urlopen(req, timeout=15) as r:
+    data = json.load(r)
+
+def bucket(kind, scope=None):
+    for l in data["limits"]:
+        if l["kind"] == kind and (scope is None or (l.get("scope") or {}).get("model", {}).get("display_name") == scope):
+            return l
+    raise SystemExit(f"limit {kind}/{scope} missing from usage response: {data['limits']}")
+
+rows = [("5h session", bucket("session")), ("weekly all", bucket("weekly_all")), ("weekly Fable", bucket("weekly_scoped", "Fable"))]
+if "--json" in sys.argv:
+    print(json.dumps({k: {"percent": v["percent"], "resets_at": v["resets_at"]} for k, v in rows}))
+    sys.exit()
+now = datetime.now(timezone.utc)
+for name, l in rows:
+    reset = datetime.fromisoformat(l["resets_at"])
+    mins = int((reset - now).total_seconds() // 60)
+    left = f"{mins//60}h{mins%60:02d}m" if mins >= 60 else f"{mins}m"
+    print(f"{name:13} {l['percent']:3d}%  resets in {left}")

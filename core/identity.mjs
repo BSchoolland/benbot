@@ -19,6 +19,10 @@ export function systemHeader(source) {
   return `[from: system · ${source}] ${q.dflt.get('system').note}`;
 }
 
+export function briefHeader() {
+  return '[from: conductor · private context for this conversation] Only you see this. Fold it into your next reply if it matters; never quote it or answer it on its own.';
+}
+
 export function reportHeader(source) {
   return `[from: ${source} · report to the conductor] ${q.dflt.get('system').note}`;
 }

@@ -5,7 +5,7 @@ import * as sessions from './sessions.mjs';
 import { loadJobs } from './jobfiles.mjs';
 
 // A job is a scheduled input to its own long-lived thread (job:<name>), never a fresh process.
-// Job sessions have no voice to humans; they report to the conductor with bin/report.
+// Job sessions have no voice to humans; they report to the conductor with report.
 // Definitions are read from jobs/*.md on every check, so edits apply without a restart.
 
 function fieldMatches(field, value, min) {
@@ -35,7 +35,7 @@ export function tick(job) {
   const item = { text: `${systemHeader(`job ${job.name} · scheduled tick`)}\n${job.prompt}` };
   if (!sessions.isStarted(threadKey)) {
     item.preface = `[session start · you are BenBot's job "${job.name}" · nothing you write reaches a person. ` +
-      'Report what matters with bin/report "<text>" (it goes to the conductor, who decides what Ben sees). Nothing changed = no report.]';
+      'Report what matters with report "<text>" (it goes to the conductor, who decides what Ben sees). Nothing changed = no report.]';
   }
   q.jobRan.run(job.name, Date.now());
   enqueue(threadKey, item);

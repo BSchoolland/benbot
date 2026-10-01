@@ -1,0 +1,45 @@
+#!/usr/bin/env node
+// Wake this thread's session when something outside it finishes (survives idle eviction and bot restarts).
+//   discord-wake <thread_id> --when-file <path> [-m "what this means"]
+//   discord-wake <thread_id> --when-exit <pid>  [-m "what this means"]
+//   discord-wake --list | --cancel <wake_id>
+// When the path appears or the pid exits, the bot delivers a system line into the session, like a message:
+//   [from: system · wake] ... <path> appeared — <text>
+// One-shot. Prints the wake id. A session that is still live just sees the line mid-conversation.
+import fs from 'node:fs';
+import path from 'node:path';
+import { db, q } from '../core/db.mjs';
+const a = process.argv.slice(2);
+const usage = () => { console.error('usage: see header of scripts/discord-wake'); process.exit(2); };
+if (!a.length) usage();
+if (a[0] === '--list') {
+  const rows = db.prepare('SELECT * FROM wakes ORDER BY id').all();
+  if (!rows.length) console.log('no watchers');
+  for (const w of rows) console.log(`${w.id}  thread ${w.thread_key}  ${w.file ? `file ${w.file}` : `exit of pid ${w.pid}`}${w.text ? `  -- ${w.text}` : ''}`);
+  process.exit(0);
+}
+if (a[0] === '--cancel') {
+  const r = db.prepare('DELETE FROM wakes WHERE id = ?').run(Number(a[1]));
+  if (!r.changes) { console.error(`no watcher ${a[1]}`); process.exit(1); }
+  console.log(`cancelled ${a[1]}`); process.exit(0);
+}
+const key = a[0];
+if (!q.thread.get(key)) { console.error(`thread ${key} is unknown to the bot`); process.exit(1); }
+const w = { thread_key: key, file: null, pid: null, pid_start: null, text: '' };
+for (let i = 1; i < a.length; i += 2) {
+  const [flag, val] = [a[i], a[i + 1]];
+  if (val === undefined) usage();
+  if (flag === '--when-file') w.file = path.resolve(val.replace(/^~/, process.env.HOME));
+  else if (flag === '--when-exit') {
+    w.pid = Number(val);
+    let stat;
+    try { stat = fs.readFileSync(`/proc/${w.pid}/stat`, 'utf8'); } catch { console.error(`pid ${val} is not running — nothing to wait for`); process.exit(1); }
+    w.pid_start = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]); // start time pairs with the pid so reuse can't fool the bot
+  } else if (flag === '-m' || flag === '--message') w.text = val.replace(/\s+/g, ' ').trim();
+  else usage();
+}
+if (!w.file && !w.pid) usage();
+if (w.file && fs.existsSync(w.file)) { console.error(`${w.file} already exists — the wake would fire immediately`); process.exit(1); }
+const r = db.prepare('INSERT INTO wakes (thread_key, file, pid, pid_start, text, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+  .run(w.thread_key, w.file, w.pid, w.pid_start, w.text, Date.now());
+console.log(r.lastInsertRowid);

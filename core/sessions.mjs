@@ -21,14 +21,12 @@ export function onNotify(fn) { notify = fn; }
 
 export function workspaceFor(name) {
   const dir = path.join(WORKSPACES, name);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(path.join(dir, '.claude'), { recursive: true });
-    const claudeMd = name === CONDUCTOR_KEY ? '../../CONDUCTOR.md' : '../../CLAUDE.md';
-    for (const [link, target] of [['CLAUDE.md', claudeMd], ['TEAM', '../../TEAM'], ['bin', '../../scripts'],
-      ['.claude/skills', '../../../skills']]) {
-      const p = path.join(dir, link);
-      if (!fs.existsSync(p)) fs.symlinkSync(target, p);
-    }
+  fs.mkdirSync(path.join(dir, '.claude'), { recursive: true });
+  const claudeMd = name === CONDUCTOR_KEY ? '../../CONDUCTOR.md' : '../../CLAUDE.md';
+  for (const [link, target] of [['CLAUDE.md', claudeMd], ['TEAM', '../../TEAM'], ['bin', '../../scripts'],
+    ['services', '../../services'], ['.claude/skills', '../../../skills']]) {
+    const p = path.join(dir, link);
+    if (!fs.existsSync(p)) fs.symlinkSync(target, p);
   }
   return dir;
 }
@@ -68,13 +66,15 @@ function logStream(threadKey) {
 function start(row) {
   const resume = sessionFileExists(row.session_uuid);
   const bin = /^gpt-|astra/.test(row.model) ? CCR_BIN : CLAUDE_BIN;
-  const thread = spawnThread(row.session_uuid, { model: row.model, cwd: cwdFor(row), bin, resume, env: { BENBOT_THREAD: row.thread_key } });
+  const thread = spawnThread(row.session_uuid, { model: row.model, cwd: cwdFor(row), bin, resume, env: { BENBOT_THREAD: row.thread_key, PATH: `${path.join(ROOT, 'scripts')}:${process.env.PATH}` },
+    args: row.effort ? ['--effort', row.effort] : [] });
+  thread.spec = { model: row.model, effort: row.effort || null };
   const log = logStream(row.thread_key);
   const key = row.thread_key;
   thread.on('spawn', ({ pid, command }) => {
     q.setPid.run(pid, key);
     log.write(JSON.stringify({ at: new Date().toISOString(), spawn: { pid, resume, command } }) + '\n');
-    console.log(`[${key}] spawned pid=${pid} resume=${resume} model=${row.model}`);
+    console.log(`[${key}] spawned pid=${pid} resume=${resume} model=${row.model}${row.effort ? ` effort=${row.effort}` : ''}`);
   });
   thread.on('event', (e) => {
     log.write(JSON.stringify({ at: new Date().toISOString(), event: e }) + '\n');
@@ -108,6 +108,12 @@ export async function deliver(threadKey, text, { mention = false } = {}) {
   const row = q.thread.get(threadKey);
   if (!row) throw new Error(`deliver: unknown thread ${threadKey}`);
   let thread = live.get(threadKey);
+  // scripts/discord-model changed the row: the session resumes under the new flags with the next message
+  if (thread && (thread.spec.model !== row.model || thread.spec.effort !== (row.effort || null))) {
+    console.log(`[${threadKey}] model ${thread.spec.model}/${thread.spec.effort ?? 'default'} → ${row.model}/${row.effort ?? 'default'}: restarting session`);
+    await thread.evict();
+    thread = null;
+  }
   if (!thread) thread = start(row);
   const t = turn.get(threadKey) ?? { busy: false, deliveries: 0 };
   if (t.busy && (mention || t.deliveries >= 1)) {
@@ -152,7 +158,7 @@ function nextResult(threadKey, timeoutMs) {
 
 // Chat sessions hand off to the conductor on the way out; jobs already report and the conductor is the conductor.
 const evictionNote = () => `${systemHeader('idle eviction')}\nThis conversation is being put to sleep (it resumes on the next message). ` +
-  'Post a two-line summary of what happened here and anything still open to the conductor with `bin/report`, then stop. No reply in the thread.';
+  'Post a two-line summary of what happened here and anything still open to the conductor with `report`, then stop. No reply in the thread.';
 
 export async function evictIdle() {
   const now = Date.now();

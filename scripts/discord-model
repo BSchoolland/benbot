@@ -1,0 +1,26 @@
+#!/usr/bin/env node
+// Set the model and effort a thread's agent runs as, from its next turn on.
+//   discord-model <thread_id> <model> [effort]      model: fable | opus | sonnet | gpt-5.6-sol | gpt-6-astra | any model id
+//   discord-model <thread_id> --effort <effort>     effort: low | medium | high | xhigh | max | default
+//   discord-model <thread_id> --show
+//   discord-model <thread_id> --clear               back to the channel's model, default effort
+// The session keeps its memory; the bot restarts the process under the new flags when the next message
+// arrives (background work started in this turn dies with the old process). Say it out loud when you switch.
+import { db, q } from '../core/db.mjs';
+const [id, ...a] = process.argv.slice(2);
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const usage = () => { console.error('usage: see header of scripts/discord-model'); process.exit(2); };
+if (!id || !a.length) usage();
+const key = /^\d+$/.test(id) ? id : id;
+const row = q.thread.get(key);
+if (!row) { console.error(`thread ${id} is unknown to the bot`); process.exit(1); }
+const effortOf = (e) => { if (e === 'default') return null; if (!EFFORTS.includes(e)) { console.error(`effort must be one of ${EFFORTS.join(', ')} or default`); process.exit(2); } return e; };
+const set = (model, effort) => {
+  db.prepare('UPDATE threads SET model = ?, effort = ? WHERE thread_key = ?').run(model, effort, key);
+  console.log(`next turn: model=${model} effort=${effort ?? 'default'}`);
+};
+const channelModel = () => q.channel.get(row.channel_id)?.model || process.env.AGENT_MODEL || 'fable';
+if (a[0] === '--show') console.log(`model=${row.model} effort=${row.effort ?? 'default'}`);
+else if (a[0] === '--clear') set(channelModel(), null);
+else if (a[0] === '--effort') { if (a.length !== 2) usage(); set(row.model, effortOf(a[1])); }
+else { if (a.length > 2) usage(); set(a[0] === 'default' ? channelModel() : a[0], a.length === 2 ? effortOf(a[1]) : row.effort); }

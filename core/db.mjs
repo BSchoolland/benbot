@@ -38,6 +38,15 @@ CREATE TABLE IF NOT EXISTS job_state (  -- definitions are files in jobs/; this 
   run_now INTEGER NOT NULL DEFAULT 0,   -- set by scripts/jobs run; the scheduler ticks it within seconds
   last_run_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS wakes (      -- one-shot watchers (scripts/discord-wake): re-enter a thread when a file appears or a pid exits
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread_key TEXT NOT NULL,
+  file TEXT,
+  pid INTEGER,
+  pid_start INTEGER,                    -- /proc start ticks, so pid reuse can't fire it
+  text TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inbox (      -- reports from sessions to the conductor (written by scripts/report)
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source TEXT NOT NULL,
@@ -48,6 +57,12 @@ CREATE TABLE IF NOT EXISTS inbox (      -- reports from sessions to the conducto
 `);
 if (!db.prepare("PRAGMA table_info(channels)").all().some((c) => c.name === 'mode')) {
   db.exec("ALTER TABLE channels ADD COLUMN mode TEXT NOT NULL DEFAULT 'threads'"); // threads | conductor | sms
+}
+if (!db.prepare("PRAGMA table_info(inbox)").all().some((c) => c.name === 'target')) {
+  db.exec('ALTER TABLE inbox ADD COLUMN target TEXT'); // null = the conductor; a thread key = a brief from the conductor (scripts/brief)
+}
+if (!db.prepare("PRAGMA table_info(threads)").all().some((c) => c.name === 'effort')) {
+  db.exec('ALTER TABLE threads ADD COLUMN effort TEXT'); // null = the model's default; set by scripts/discord-model
 }
 
 const seed = db.prepare('INSERT OR IGNORE INTO defaults (kind, note) VALUES (?, ?)');
@@ -65,6 +80,9 @@ export const q = {
   insertThread: db.prepare(`INSERT INTO threads (thread_key, session_uuid, guild_id, channel_id, model, pid, started, last_activity, last_delivered_id, created_at)
     VALUES (@thread_key, @session_uuid, @guild_id, @channel_id, @model, NULL, 0, @now, '0', @now)`),
   setPid: db.prepare('UPDATE threads SET pid = ? WHERE thread_key = ?'),
+  setModel: db.prepare('UPDATE threads SET model = ?, effort = ? WHERE thread_key = ?'),
+  wakes: db.prepare('SELECT * FROM wakes ORDER BY id'),
+  deleteWake: db.prepare('DELETE FROM wakes WHERE id = ?'),
   setStarted: db.prepare('UPDATE threads SET started = 1 WHERE thread_key = ?'),
   touch: db.prepare('UPDATE threads SET last_activity = ? WHERE thread_key = ?'),
   setDelivered: db.prepare('UPDATE threads SET last_delivered_id = ? WHERE thread_key = ?'),

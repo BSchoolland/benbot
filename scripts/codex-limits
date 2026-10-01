@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Print Ben's codex (ChatGPT) pool utilization: 5-hour window and weekly window.
+Usage: codex-limits [--json]. The gpt-* models bill this pool, not the Anthropic sub."""
+import json, sys, urllib.request
+
+auth = json.load(open("/home/ben/.codex/auth.json"))["tokens"]
+req = urllib.request.Request("https://chatgpt.com/backend-api/codex/usage",
+    headers={"Authorization": "Bearer " + auth["access_token"],
+             "chatgpt-account-id": auth["account_id"],
+             "User-Agent": "codex/1.0"})
+with urllib.request.urlopen(req, timeout=15) as r:
+    data = json.load(r)
+
+rl = data["rate_limit"]
+rows = [("5h session", rl["primary_window"]), ("weekly", rl["secondary_window"])]
+if "--json" in sys.argv:
+    print(json.dumps({k: {"percent": v["used_percent"], "reset_after_seconds": v["reset_after_seconds"]}
+                      for k, v in rows}))
+    sys.exit()
+for name, w in rows:
+    mins = w["reset_after_seconds"] // 60
+    left = f"{mins//1440}d{mins//60%24}h" if mins >= 1440 else f"{mins//60}h{mins%60:02d}m" if mins >= 60 else f"{mins}m"
+    print(f"{name:11} {w['used_percent']:3d}%  resets in {left}")
