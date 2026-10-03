@@ -1,0 +1,39 @@
+#!/usr/bin/env node
+// Wide events of voice calls (state/voice-events.jsonl), newest snapshot per event.
+//   voice-events                 the latest call: its summary, then one line per utterance
+//   voice-events <thread id>     that call
+//   voice-events --json [id]     the raw records
+import fs from 'node:fs';
+import { EVENTS_FILE } from '../core/voicelog.mjs';
+
+const args = process.argv.slice(2);
+const json = args.includes('--json');
+const trace = args.find((a) => !a.startsWith('--'));
+const byId = new Map();
+for (const f of [EVENTS_FILE + '.1', EVENTS_FILE].filter((f) => fs.existsSync(f))) {
+  for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
+    if (!line) continue;
+    const r = JSON.parse(line);
+    if (!byId.has(r.id) || r.seq > byId.get(r.id).seq) byId.set(r.id, r);
+  }
+}
+const all = [...byId.values()].sort((a, b) => a.t0 - b.t0);
+const call = trace ? all.find((e) => e.kind === 'call' && e.trace === trace) : all.filter((e) => e.kind === 'call').at(-1);
+if (!call) { console.error(trace ? `no call for thread ${trace}` : 'no calls recorded'); process.exit(1); }
+const events = all.filter((e) => e.trace === call.trace);
+if (json) { for (const e of events) console.log(JSON.stringify(e)); process.exit(0); }
+
+const clock = (t) => new Date(t).toLocaleTimeString('en-US', { hour12: false, timeZone: 'America/Chicago' });
+const { business: c } = call;
+console.log(`call ${call.trace} ${clock(call.t0)}-${clock(call.t1)}${call.final ? '' : ' (open)'} [${call.level}] ${call.headline ?? ''}`);
+console.log(`  ${JSON.stringify(Object.fromEntries(Object.entries(c).filter(([k]) => k !== 'connStates')))}`);
+for (const i of call.issues) console.log(`  ${i.level} ${i.code} x${i.n} @${clock(i.at)}: ${i.message}`);
+for (const e of events.filter((e) => e.kind === 'utterance')) {
+  const b = e.business;
+  const r = b.rtp ?? {};
+  const before = r.gapBefore ? ` gapBefore ${r.gapBefore.wallMs}ms(rtp ${r.gapBefore.rtpMs}ms, lost ${r.gapBefore.lost})` : '';
+  const gaps = (r.gaps ?? []).map((g) => `${g.wallMs}${g.lost ? `/-${g.lost}` : ''}@${g.at}`).join(' ');
+  console.log(`${clock(e.t0)} ${String(b.outcome).padEnd(14)} ${b.audioS}s wall ${b.wallMs}ms pkts ${r.packets} lost ${r.lost} silent ${b.silenceFrames}`
+    + `${b.sinceLastMs !== undefined ? ` since ${b.sinceLastMs}ms` : ''} idleBefore ${r.idleBefore}${before}${gaps ? ` gaps[${gaps}]` : ''}`
+    + `${b.stt ? ` conf ${b.stt.confidence} min ${b.stt.minLogprob} ${b.stt.ms}ms "${b.stt.text}"` : ''}${e.level !== 'info' ? ` [${e.level}] ${e.headline}` : ''}`);
+}

@@ -22,8 +22,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, STATE_DIR } from './config.mjs';
-
-
+import { finish, openEvent } from './voicelog.mjs';
 
 const VOICE_STATE = path.join(STATE_DIR, 'voice');
 const SEND_HELPER = path.join(ROOT, 'scripts', 'discord-send');
@@ -43,6 +42,9 @@ const STT_NOISE = new Set(['you', 'thank you', 'thanks for watching', 'bye', '.'
 // Mean token logprob below this is the model guessing at road noise ("Oké", "Allora",
 // "ogólnych"); clear speech scores around -0.05 to -0.3. Every transcript logs its score.
 const STT_MIN_LOGPROB = -0.6;
+const RTP_GAP_MS = 200; // a wall-clock pause between two of the owner's packets worth recording
+const MAX_GAPS = 30;
+const SILENCE_FRAME = Buffer.from([0xf8, 0xff, 0xfe]);
 
 export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThread, onTranscript, onEnd, log }) {
   const sessions = new Map(); // guildId -> session
@@ -104,6 +106,11 @@ export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThrea
       dropDir: path.join(VOICE_STATE, thread.id),
       watcher: null,
       capturing: new Set(),
+      call: openEvent('call', thread.id).set('channel', channel.name).set('owner', member.displayName),
+      utterances: new Map(), // userId -> the open utterance event
+      rtp: new Map(), // userId -> { seq, ts, at, idle: packets seen while no utterance was open, gap: the last gap seen outside one }
+      lastUtteranceEnd: null,
+      surfaced: new Set(), // issue codes already posted to the thread
     };
     sessions.set(session.guildId, session);
     byThread.set(thread.id, session);
@@ -111,22 +118,26 @@ export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThrea
     fs.rmSync(session.dropDir, { recursive: true, force: true });
     fs.mkdirSync(session.dropDir, { recursive: true });
     session.watcher = fs.watch(session.dropDir, () => scanDrops(session));
+    session.watcher.on('error', (e) => problem(session, 'error', 'drop-watch', e.message));
     log(`voice: joining #${channel.name} for ${member.displayName}, thread ${thread.id}`);
 
     session.player.on(AudioPlayerStatus.Idle, () => playNext(session));
-    session.player.on('error', (e) => log(`voice: player error: ${e.message}`));
+    session.player.on('error', (e) => problem(session, 'error', 'player', e.message, e.stack));
 
     try {
-      session.connection = await connect(channel);
+      session.connection = await connect(channel, session);
     } catch (e) {
-      log(`voice: giving up: ${e.message}`);
+      problem(session, 'error', 'connect', `giving up: ${e.message}`);
       await end(session, 'could not connect');
       return;
     }
     const { connection } = session;
     connection.subscribe(session.player);
+    tapRtp(session);
+    connection.on('stateChange', (_o, n) => { if (n.status === VoiceConnectionStatus.Ready) tapRtp(session); });
 
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
+      session.call.count('disconnects');
       try {
         // Discord kicked us or the channel moved; a real disconnect never
         // re-enters Signalling/Connecting.
@@ -140,20 +151,81 @@ export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThrea
     });
 
     connection.receiver.speaking.on('start', (userId) => {
-      if (!ownerIds.includes(userId) || session.capturing.has(userId)) return;
-      capture(session, userId).catch((e) => log(`voice: capture error: ${e.message}`));
+      if (!ownerIds.includes(userId)) return;
+      if (session.capturing.has(userId)) return void session.call.count('speakingStartWhileCapturing');
+      capture(session, userId).catch((e) => {
+        session.utterances.get(userId)?.issue('error', 'capture', e.message, e.stack);
+        problem(session, 'error', 'capture', e.message, e.stack);
+      });
     });
 
+    session.call.set('connected', Date.now() - session.call.t0);
     await thread.send(`🎙 Voice session started in **#${channel.name}**. Everything ${member.displayName} says lands here as text; my replies are read aloud.`);
-    say(thread.id, greeting);
+    say(session, greeting);
+  }
+
+  // Every problem during a call: on the call's wide event, in the journal, and the first of each kind of error
+  // posted to the thread (a 🎙 line, so it is not read aloud).
+  function problem(session, level, code, message, detail) {
+    session.call.issue(level, code, message, detail);
+    log(`voice: ${level} ${code}: ${message} (thread ${session.threadId})`);
+    if (level !== 'error' || session.surfaced.has(code)) return;
+    session.surfaced.add(code);
+    client.channels.fetch(session.threadId)
+      .then((t) => t.send(`🎙 ⚠️ voice ${code} error: ${message.slice(0, 300)}`))
+      .catch((e) => log(`voice: could not post ${code} error to thread ${session.threadId}: ${e.message}`));
+  }
+
+  // Watches the owner's raw RTP packets on the voice UDP socket. Sequence numbers tell network loss
+  // (seq jumps) apart from the sender going quiet (seq contiguous, RTP timestamp jumps), and packets that
+  // arrive while no utterance is subscribed are audio nobody transcribed.
+  function tapRtp(session) {
+    const udp = session.connection.state.networking?.state?.udp;
+    if (!udp) return problem(session, 'warn', 'rtp-tap', 'connection is Ready but has no UDP socket');
+    if (udp.benbotTapped) return;
+    udp.benbotTapped = true;
+    session.call.count('rtpTaps');
+    const { receiver } = session.connection;
+    udp.on('message', (msg) => {
+      if (msg.length <= 12 || (msg[1] & 0x7f) !== 120) return;
+      const userId = receiver.ssrcMap.get(msg.readUInt32BE(8))?.userId;
+      if (!ownerIds.includes(userId)) return;
+      const seq = msg.readUInt16BE(2);
+      const ts = msg.readUInt32BE(4);
+      const now = Date.now();
+      const utterance = session.utterances.get(userId);
+      let st = session.rtp.get(userId);
+      if (!st) session.rtp.set(userId, (st = { idle: 0, gap: null }));
+      if (st.at !== undefined) {
+        const seqJump = (seq - st.seq) & 0xffff;
+        const lost = seqJump > 1 && seqJump < 3000 ? seqJump - 1 : 0;
+        const wallMs = now - st.at;
+        const gap = wallMs >= RTP_GAP_MS ? { at: now, wallMs, rtpMs: Math.round(((ts - st.ts) >>> 0) / 48), lost } : null;
+        if (utterance) {
+          const r = utterance.business.rtp;
+          r.packets++;
+          r.lost += lost;
+          if (gap && r.gaps.length < MAX_GAPS) r.gaps.push({ ...gap, at: gap.at - utterance.t0 });
+        } else {
+          st.idle++;
+          if (gap) st.gap = gap;
+        }
+        if (seqJump === 0 || seqJump >= 3000) session.call.count('rtpOutOfOrder');
+        if (lost) session.call.count('rtpLost', lost);
+      } else if (utterance) utterance.business.rtp.packets++;
+      else st.idle++;
+      session.call.count('rtpPackets');
+      Object.assign(st, { seq, ts, at: now });
+    });
   }
 
   // The UDP handshake sometimes never gets an answer (seen right after a bot
   // restart that left a stale voice session behind). Re-sending the join for
   // the same channel reuses the stuck socket, so retry from a fresh connection.
-  async function connect(channel) {
+  async function connect(channel, session) {
     let lastError;
     for (let attempt = 1; attempt <= READY_ATTEMPTS; attempt++) {
+      session.call.set('connectAttempts', attempt);
       const connection = joinVoiceChannel({
         channelId: channel.id,
         guildId: channel.guild.id,
@@ -161,11 +233,13 @@ export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThrea
         selfDeaf: false,
         selfMute: false,
       });
-      connection.on('error', (e) => log(`voice: connection error: ${e.message}`));
+      connection.on('error', (e) => problem(session, 'error', 'connection', e.message, e.stack));
       connection.on('stateChange', (o, n) => {
         const net = n.networking?.state;
         const where = net ? ` (net ${NetworkingStatusCode[net.code]} @ ${net.connectionOptions?.endpoint})` : '';
         log(`voice: conn ${o.status} -> ${n.status}${where}`);
+        const states = (session.call.business.connStates ??= []);
+        if (states.length < 50) states.push({ at: Date.now() - session.call.t0, from: o.status, to: n.status, ...(net ? { net: NetworkingStatusCode[net.code] } : {}) });
       });
       try {
         await entersState(connection, VoiceConnectionStatus.Ready, READY_TIMEOUT_MS);
@@ -173,7 +247,7 @@ export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThrea
       } catch (e) {
         lastError = e;
         const net = connection.state.networking?.state;
-        log(`voice: attempt ${attempt}/${READY_ATTEMPTS} never became Ready (net ${net ? NetworkingStatusCode[net.code] : 'none'} @ ${net?.connectionOptions?.endpoint})`);
+        problem(session, 'warn', 'connect-attempt', `attempt ${attempt}/${READY_ATTEMPTS} never became Ready (net ${net ? NetworkingStatusCode[net.code] : 'none'} @ ${net?.connectionOptions?.endpoint})`);
         connection.destroy();
         await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
       }
@@ -187,21 +261,62 @@ export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThrea
     byThread.delete(session.threadId);
     session.watcher?.close();
     session.queue.length = 0;
-    try {
-      session.player.stop(true);
-    } catch {}
-    session.connection?.destroy();
+    session.player.stop(true);
+    if (session.connection && session.connection.state.status !== VoiceConnectionStatus.Destroyed) session.connection.destroy();
     fs.rmSync(session.dropDir, { recursive: true, force: true });
     log(`voice: session ended (${why}), thread ${session.threadId}`);
-    const thread = await client.channels.fetch(session.threadId).catch(() => null);
-    if (thread) await thread.send(`🎙 Voice session ended (${why}). Thread still works as text.`).catch((e) => log(`voice: end notice failed: ${e.message}`));
-    await onEnd(session.threadId, why);
+    session.call.set('ended', why);
+    for (const u of session.utterances.values()) { u.set('outcome', 'call-ended'); finish(u); }
+    try {
+      const thread = await client.channels.fetch(session.threadId);
+      await thread.send(`🎙 Voice session ended (${why}). Thread still works as text.`);
+    } catch (e) {
+      session.call.issue('error', 'end-notice', e.message);
+      log(`voice: end notice failed: ${e.message}`);
+    }
+    try {
+      await onEnd(session.threadId, why);
+    } catch (e) {
+      session.call.issue('error', 'on-end', e.message, e.stack);
+      throw e;
+    } finally {
+      finish(session.call);
+    }
   }
 
   // ---------- listening ----------
+  // One utterance = one wide event: how the audio arrived (packets, gaps, loss), why it ended, what STT made
+  // of it and what happened to the text. Each also gets one journal line.
   async function capture(session, userId) {
     session.capturing.add(userId);
-    const member = await client.guilds.cache.get(session.guildId)?.members.fetch(userId).catch(() => null);
+    const u = openEvent('utterance', session.threadId, session.call.id);
+    session.utterances.set(userId, u);
+    const st = session.rtp.get(userId);
+    u.set('rtp', { packets: 0, lost: 0, gaps: [], idleBefore: st?.idle ?? 0, gapBefore: st?.gap ? { ...st.gap, at: st.gap.at - u.t0 } : null });
+    if (st) { st.idle = 0; st.gap = null; }
+    if (session.lastUtteranceEnd) u.set('sinceLastMs', u.t0 - session.lastUtteranceEnd);
+    session.call.count('utterances');
+    try {
+      await listen(session, userId, u);
+    } catch (e) {
+      u.issue('error', 'capture', e.message, e.stack);
+      u.set('outcome', 'error');
+      throw e;
+    } finally {
+      session.utterances.delete(userId);
+      session.call.count(`outcome.${u.business.outcome}`);
+      const b = u.business;
+      const gaps = b.rtp.gaps.map((g) => `${g.wallMs}ms${g.lost ? `/lost${g.lost}` : ''}`).join(',');
+      log(`voice: utterance ${b.outcome} ${b.audioS ?? '?'}s wall ${b.wallMs ?? '?'}ms pkts ${b.rtp.packets} lost ${b.rtp.lost} gaps [${gaps}] idleBefore ${b.rtp.idleBefore}${b.sinceLastMs !== undefined ? ` since ${b.sinceLastMs}ms` : ''}${b.stt ? ` conf ${b.stt.confidence?.toFixed(2)} stt ${b.stt.ms}ms: ${b.stt.text}` : ''}`);
+      finish(u);
+    }
+  }
+
+  async function listen(session, userId, u) {
+    const member = await client.guilds.cache.get(session.guildId)?.members.fetch(userId).catch((e) => {
+      u.issue('warn', 'member-fetch', e.message);
+      return null;
+    });
     const name = member?.displayName || 'owner';
     const opus = session.connection.receiver.subscribe(userId, {
       end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_END_MS },
@@ -209,10 +324,14 @@ export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThrea
     const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
     const pcm = [];
     let bytes = 0;
+    let frames = 0;
+    let silenceFrames = 0;
     let bargedIn = false;
     const overPlayback = session.player.state.status === AudioPlayerStatus.Playing; // only then can this cut us off
+    u.set('overPlayback', overPlayback);
+    opus.on('data', (p) => { frames++; if (p.equals(SILENCE_FRAME)) silenceFrames++; });
 
-    await new Promise((resolve) => {
+    const ended = await new Promise((resolve) => {
       opus
         .pipe(decoder)
         .on('data', (c) => {
@@ -226,47 +345,62 @@ export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThrea
           }
         })
         .on('error', (e) => {
-          log(`voice: decode error: ${e.message}`);
-          resolve();
+          u.issue('error', 'decode', e.message);
+          problem(session, 'error', 'decode', e.message);
+          resolve('decode-error');
         })
-        .on('end', resolve);
+        .on('end', () => resolve('silence'));
       opus.on('error', (e) => {
-        log(`voice: receive error: ${e.message}`);
-        resolve();
+        u.issue('error', 'receive', e.message);
+        problem(session, 'error', 'receive', e.message);
+        resolve('receive-error');
       });
     });
     session.capturing.delete(userId);
     if (session.player.state.status === AudioPlayerStatus.Idle) playNext(session); // release replies held while they talked
 
     const seconds = bytes / (48000 * 2 * 2);
-    const notSpeech = () => {
+    session.lastUtteranceEnd = Date.now();
+    u.set('ended', ended).set('wallMs', Date.now() - u.t0).set('audioS', +seconds.toFixed(2)).set('frames', frames).set('silenceFrames', silenceFrames);
+    if (bargedIn) { u.set('bargedIn', true); session.call.count('bargeIns'); }
+    const notSpeech = (outcome) => {
+      u.set('outcome', outcome);
       if (bargedIn) session.player.unpause();
     };
-    if (seconds < MIN_UTTERANCE_S) return notSpeech();
+    if (seconds < MIN_UTTERANCE_S) return notSpeech('too-short');
 
-    let text, confidence;
+    let stt;
     try {
-      ({ text, confidence } = await transcribe(wav(Buffer.concat(pcm), 48000, 2)));
+      stt = await transcribe(wav(Buffer.concat(pcm), 48000, 2));
     } catch (e) {
-      notSpeech();
-      throw e;
+      notSpeech('stt-error');
+      u.issue('error', 'stt', e.message);
+      problem(session, 'error', 'stt', e.message);
+      return;
     }
+    const { text, confidence } = stt;
+    u.set('stt', stt);
     const norm = text.trim().toLowerCase().replace(/[.!?,]+$/, '');
-    if (STT_NOISE.has(norm) || !/[a-z]/.test(norm)) return notSpeech();
-    if (confidence < STT_MIN_LOGPROB) {
-      log(`voice: dropped low-confidence transcript (${confidence.toFixed(2)}, ${seconds.toFixed(1)}s): ${text}`);
-      return notSpeech();
-    }
-    log(`voice: ${name} (${seconds.toFixed(1)}s, ${confidence.toFixed(2)}): ${text}`);
+    if (STT_NOISE.has(norm) || !/[a-z]/.test(norm)) return notSpeech('noise');
+    if (confidence < STT_MIN_LOGPROB) return notSpeech('low-confidence');
+    u.set('outcome', 'posted');
     if (bargedIn) {
       dropPending(session);
       session.player.stop(true);
     }
-    await onTranscript(session.threadId, userId, name, text.trim());
+    try {
+      await onTranscript(session.threadId, userId, name, text.trim());
+    } catch (e) {
+      u.set('outcome', 'post-error');
+      u.issue('error', 'post', e.message, e.stack);
+      problem(session, 'error', 'post', `transcript not delivered: ${e.message}`, text);
+      return;
+    }
     chime(session);
   }
 
   async function transcribe(wavBuffer) {
+    const started = Date.now();
     const form = new FormData();
     form.append('model', STT_MODEL);
     form.append('language', 'en');
@@ -282,15 +416,15 @@ export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThrea
     const body = await r.json();
     const lps = (body.logprobs || []).map((t) => t.logprob);
     if (!lps.length) throw new Error('STT response has no logprobs');
-    return { text: body.text || '', confidence: lps.reduce((a, b) => a + b, 0) / lps.length };
+    return { text: body.text || '', confidence: +(lps.reduce((a, b) => a + b, 0) / lps.length).toFixed(3), minLogprob: +Math.min(...lps).toFixed(3), ms: Date.now() - started };
   }
 
   // ---------- speaking ----------
   // Bot-originated lines (greetings) go through the same helper the agent
   // uses, so they get the same voice and effects.
-  function say(threadId, text) {
-    execFile(SEND_HELPER, [threadId, text], (err, _out, stderr) => {
-      if (err) log(`voice: say failed: ${(stderr || err.message).trim()}`);
+  function say(session, text) {
+    execFile(SEND_HELPER, [session.threadId, text], (err, _out, stderr) => {
+      if (err) problem(session, 'error', 'say', (stderr || err.message).trim());
     });
   }
 
@@ -341,8 +475,9 @@ export function createVoice({ client, apiKey, ownerIds, onlyChannelId, openThrea
     try {
       const { input, inputType } = await next.load();
       session.player.play(createAudioResource(input, { inputType }));
+      session.call.count(next.file ? 'clipsPlayed' : 'chimes');
     } catch (e) {
-      log(`voice: playback error: ${e.message}`);
+      problem(session, 'error', 'playback', e.message, e.stack);
       playNext(session);
     }
   }
