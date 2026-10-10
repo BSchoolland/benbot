@@ -1,0 +1,10 @@
+[Unit]
+Description=BenBot — re-run the Claude Code and codex OAuth logins through Ben's Chrome before they lapse
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/benbot
+ExecStart=%h/.nvm/versions/node/v24.13.0/bin/node scripts/renew-logins
+Environment=PATH=%h/.local/bin:%h/.nvm/versions/node/v24.13.0/bin:/usr/local/bin:/usr/bin:/bin
+Environment=DISPLAY=:0
+TimeoutStartSec=600

@@ -1,0 +1,168 @@
+#!/usr/bin/env node
+// Re-run the Claude Code, codex (claude-code-proxy) and codex CLI (~/.codex, the forge's sheets) OAuth logins through Ben's logged-in Chrome before they lapse.
+// Usage: renew-logins [--force claude|codex|codex-cli]. Runs daily from renew-logins.timer; failures go to the conductor.
+// Claude: renewed when its refresh token has under CLAUDE_MARGIN_DAYS left. The codex logins show no refresh-token
+// expiry, so each is renewed every CODEX_EVERY_DAYS, stamped in state/renew-logins.json.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
+
+const HOME = os.homedir();
+const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const STATE = path.join(ROOT, 'state/renew-logins.json');
+const CLAUDE_CREDS = path.join(HOME, '.claude/.credentials.json');
+const CODEX_CLI_AUTH = path.join(HOME, '.codex/auth.json');
+const CDP = 'http://127.0.0.1:9222';
+const DAY = 86_400_000;
+const CLAUDE_MARGIN_DAYS = 5;
+const CODEX_EVERY_DAYS = 14;
+const GOOGLE_ACCOUNT = 'OWNER_EMAIL';
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const state = fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : {};
+const claudeRefreshExpiry = () => JSON.parse(fs.readFileSync(CLAUDE_CREDS, 'utf8')).claudeAiOauth.refreshTokenExpiresAt;
+
+const CODEX_PAGES = [
+  { url: /auth\.openai\.com\/log-in/, button: 'Continue with Google' },
+  { url: /auth\.openai\.com\/choose-an-account/, button: GOOGLE_ACCOUNT, partial: true },
+  { url: /accounts\.google\.com/, button: GOOGLE_ACCOUNT },
+  { url: /auth\.openai\.com\/.*consent/, button: 'Continue' },
+];
+
+// Each page in a provider's consent flow, matched by URL, and the button to press there.
+const PROVIDERS = {
+  claude: {
+    cmd: 'claude auth login',
+    pages: [{ url: /claude\.ai\/oauth\/authorize/, button: 'Authorize' }],
+    due: () => claudeRefreshExpiry() - Date.now() < CLAUDE_MARGIN_DAYS * DAY,
+    before: () => claudeRefreshExpiry(),
+    verify: (prev) => {
+      const next = claudeRefreshExpiry();
+      if (!(next > prev)) throw new Error(`claude refresh-token expiry did not move (${new Date(next).toISOString()})`);
+      return `refresh token good until ${new Date(next).toISOString()}`;
+    },
+  },
+  codex: {
+    cmd: 'claude-code-proxy codex auth login',
+    pages: CODEX_PAGES,
+    due: () => !state.codexLoginAt || Date.now() - state.codexLoginAt > CODEX_EVERY_DAYS * DAY,
+    before: () => null,
+    verify: () => {
+      const out = execFileSync('claude-code-proxy', ['codex', 'auth', 'status'], { encoding: 'utf8' });
+      state.codexLoginAt = Date.now();
+      return out.match(/Expires: .*/)?.[0] ?? out.trim();
+    },
+  },
+  'codex-cli': {
+    cmd: 'codex login',
+    pages: CODEX_PAGES,
+    due: () => !state.codexCliLoginAt || Date.now() - state.codexCliLoginAt > CODEX_EVERY_DAYS * DAY,
+    // `codex login` logs out before it starts, so a failed renewal must put the old login back
+    before: () => { fs.copyFileSync(CODEX_CLI_AUTH, `${CODEX_CLI_AUTH}.renewing`); return fs.statSync(CODEX_CLI_AUTH).mtimeMs; },
+    restore: () => fs.existsSync(`${CODEX_CLI_AUTH}.renewing`) && fs.renameSync(`${CODEX_CLI_AUTH}.renewing`, CODEX_CLI_AUTH),
+    cleanup: () => fs.rmSync(`${CODEX_CLI_AUTH}.renewing`, { force: true }),
+    verify: (prev) => {
+      if (!(fs.statSync(CODEX_CLI_AUTH).mtimeMs > prev)) throw new Error(`${CODEX_CLI_AUTH} was not rewritten`);
+      const r = spawnSync('codex', ['login', 'status'], { encoding: 'utf8' });
+      const out = (r.stdout + r.stderr).trim();
+      if (!/ChatGPT/.test(out)) throw new Error(`codex login status: ${out}`);
+      state.codexCliLoginAt = Date.now();
+      return out;
+    },
+  },
+};
+
+async function evalIn(targetId, expression) {
+  const ws = new WebSocket(`ws://127.0.0.1:9222/devtools/page/${targetId}`);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { ws.close(); reject(new Error('CDP evaluate timed out')); }, 15_000);
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression, returnByValue: true } }));
+    ws.onmessage = (m) => {
+      const r = JSON.parse(m.data);
+      if (r.id !== 1) return;
+      clearTimeout(timer); ws.close();
+      r.result?.exceptionDetails ? reject(new Error(r.result.exceptionDetails.text)) : resolve(r.result?.result?.value);
+    };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error('CDP websocket error')); };
+  });
+}
+
+// Start the CLI login, pull the localhost-callback authorize URL out of its output (or the BROWSER it invokes).
+function startLogin(cmd) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'renew-'));
+  const urlFile = path.join(dir, 'url');
+  const browser = path.join(dir, 'browser');
+  fs.writeFileSync(browser, `#!/bin/sh\necho "$1" >> ${urlFile}\n`, { mode: 0o700 });
+  const child = spawn('script', ['-qfc', cmd, '/dev/null'], { env: { ...process.env, BROWSER: browser }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => { output += d; });
+  child.stderr.on('data', (d) => { output += d; });
+  const exited = new Promise((resolve) => child.on('exit', (code) => resolve({ code, output })));
+  const url = (async () => {
+    for (let i = 0; i < 30; i++) {
+      const seen = (fs.existsSync(urlFile) ? fs.readFileSync(urlFile, 'utf8') : '') + output;
+      const m = seen.match(/https:\/\/\S+redirect_uri=http%3A%2F%2F(?:localhost|127\.0\.0\.1)\S+?(?=\s|\x1b|\x07|$)/);
+      if (m) return m[0];
+      await sleep(1000);
+    }
+    child.kill();
+    throw new Error(`no login URL from \`${cmd}\`:\n${output.slice(-500)}`);
+  })();
+  return { child, url, exited };
+}
+
+async function renew(name) {
+  const p = PROVIDERS[name];
+  const prev = p.before();
+  const { child, url, exited } = startLogin(p.cmd);
+  const tab = await (await fetch(`${CDP}/json/new?${encodeURIComponent(await url)}`, { method: 'PUT' })).json();
+  let done;
+  exited.then((r) => { done = r; });
+  try {
+    let lastPage = '', stuckSince = Date.now();
+    while (!done) {
+      if (Date.now() - stuckSince > 45_000) throw new Error(`stuck on ${lastPage}`);
+      await sleep(3000);
+      const page = await evalIn(tab.id, 'location.href + "\\n" + document.body.innerText.slice(0, 400)').catch(() => null);
+      if (!page) continue;
+      const step = p.pages.find((s) => s.url.test(page.split('\n')[0]));
+      if (page !== lastPage) { lastPage = page; stuckSince = Date.now(); }
+      if (!step) continue;
+      const clicked = await evalIn(tab.id, `(() => {
+        const el = [...document.querySelectorAll('button, [role=button], [role=link], li, div[data-identifier]')]
+          .filter((b) => (${!!step.partial} ? b.innerText?.includes(${JSON.stringify(step.button)}) : b.innerText?.trim() === ${JSON.stringify(step.button)}) || b.getAttribute?.('data-identifier') === ${JSON.stringify(step.button)}).pop();
+        if (!el) return false; el.click(); return true; })()`);
+      if (clicked) await sleep(4000);
+    }
+    if (done.code !== 0) throw new Error(`\`${p.cmd}\` exited ${done.code}:\n${done.output.slice(-500)}`);
+    return p.verify(prev);
+  } finally {
+    child.kill();
+    await fetch(`${CDP}/json/close/${tab.id}`).catch((e) => console.error(`closing tab ${tab.id}: ${e.message}`));
+  }
+}
+
+const fi = process.argv.indexOf('--force');
+const forced = fi >= 0 ? process.argv[fi + 1] : null;
+if (forced && !PROVIDERS[forced]) { console.error('usage: renew-logins [--force claude|codex|codex-cli]'); process.exit(2); }
+
+execFileSync('bash', [path.join(ROOT, 'services/budget/ensure-chrome.sh')], { stdio: 'inherit' });
+const failures = [];
+for (const name of Object.keys(PROVIDERS)) {
+  if (forced ? forced !== name : !PROVIDERS[name].due()) { console.log(`${name}: not due`); continue; }
+  try {
+    console.log(`${name}: renewed, ${await renew(name)}`);
+    fs.writeFileSync(STATE, JSON.stringify(state, null, 2));
+    PROVIDERS[name].cleanup?.();
+  } catch (e) {
+    PROVIDERS[name].restore?.();
+    console.error(`${name}: FAILED: ${e.message}`);
+    failures.push(`${name}: ${e.message}`);
+  }
+}
+if (failures.length) {
+  execFileSync(path.join(ROOT, 'scripts/report'), ['--from', 'renew-logins',
+    `Auto re-login through Chrome failed; tell Ben, these lapse soon without a manual login:\n${failures.join('\n')}`]);
+  process.exit(1);
+}
