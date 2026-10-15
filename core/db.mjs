@@ -47,6 +47,18 @@ CREATE TABLE IF NOT EXISTS wakes (      -- one-shot watchers (scripts/discord-wa
   text TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS transcript_repairs ( -- open refusal-fallback incidents (core/recovery.mjs); the row is deleted on recovery
+  session_uuid TEXT PRIMARY KEY,
+  thread_key TEXT NOT NULL,
+  state TEXT NOT NULL,                  -- repairing (waiting for an idle session) | verifying | failed
+  attempts INTEGER NOT NULL DEFAULT 0,
+  fallback_at INTEGER NOT NULL,         -- byte offset of the first fallback notice of this incident
+  cut_at INTEGER,                       -- byte offset the last rollback cut at; verification reads from here
+  expected_model TEXT NOT NULL,         -- what a recovered reply must run on
+  fallback_model TEXT,
+  backup TEXT,                          -- the first (pre-repair) backup
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inbox (      -- reports from sessions to the conductor (written by scripts/report)
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source TEXT NOT NULL,
@@ -60,6 +72,9 @@ if (!db.prepare("PRAGMA table_info(channels)").all().some((c) => c.name === 'mod
 }
 if (!db.prepare("PRAGMA table_info(inbox)").all().some((c) => c.name === 'target')) {
   db.exec('ALTER TABLE inbox ADD COLUMN target TEXT'); // null = the conductor; a thread key = a brief from the conductor (scripts/brief)
+}
+if (!db.prepare("PRAGMA table_info(transcript_repairs)").all().some((c) => c.name === 'status_msg')) {
+  db.exec('ALTER TABLE transcript_repairs ADD COLUMN status_msg TEXT'); // the Discord message the incident's status is edited into
 }
 if (!db.prepare("PRAGMA table_info(threads)").all().some((c) => c.name === 'effort')) {
   db.exec('ALTER TABLE threads ADD COLUMN effort TEXT'); // null = the model's default; set by scripts/discord-model
@@ -98,6 +113,13 @@ export const q = {
   jobState: db.prepare('SELECT * FROM job_state WHERE name = ?'),
   jobRan: db.prepare('INSERT INTO job_state (name, run_now, last_run_at) VALUES (?, 0, ?) ON CONFLICT(name) DO UPDATE SET run_now = 0, last_run_at = excluded.last_run_at'),
   jobRunNow: db.prepare('INSERT INTO job_state (name, run_now) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET run_now = 1'),
+  repair: db.prepare('SELECT * FROM transcript_repairs WHERE session_uuid = ?'),
+  insertRepair: db.prepare(`INSERT INTO transcript_repairs (session_uuid, thread_key, state, fallback_at, expected_model, fallback_model, updated_at)
+    VALUES (@session_uuid, @thread_key, 'repairing', @fallback_at, @expected_model, @fallback_model, @now)`),
+  updateRepair: db.prepare(`UPDATE transcript_repairs SET state = @state, attempts = @attempts, cut_at = @cut_at, backup = @backup, updated_at = @now
+    WHERE session_uuid = @session_uuid`),
+  setRepairStatusMsg: db.prepare('UPDATE transcript_repairs SET status_msg = ? WHERE session_uuid = ?'),
+  deleteRepair: db.prepare('DELETE FROM transcript_repairs WHERE session_uuid = ?'),
   inboxPending: db.prepare('SELECT * FROM inbox WHERE delivered_at IS NULL ORDER BY id'),
   inboxDelivered: db.prepare('UPDATE inbox SET delivered_at = ? WHERE id = ?'),
 };

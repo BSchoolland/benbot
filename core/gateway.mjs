@@ -18,9 +18,10 @@ const dmKey = (channelId) => `dm:${channelId}`;
 const discordIdOf = (threadKey) => threadKey.startsWith('dm:') ? threadKey.slice(3)
   : sessions.isChat(threadKey) ? threadKey : conductor.channelId();
 
-async function post(threadKey, text) {
+async function post(threadKey, text, { editId } = {}) {
   const ch = await client.channels.fetch(discordIdOf(threadKey));
-  await ch.send(sessions.isChat(threadKey) ? text : `[${threadKey}] ${text}`);
+  const body = sessions.isChat(threadKey) ? text : `[${threadKey}] ${text}`;
+  return (editId ? await ch.messages.edit(editId, body) : await ch.send(body)).id;
 }
 sessions.onNotify(post);
 conductor.onMirror((text) => post(sessions.CONDUCTOR_KEY, text));

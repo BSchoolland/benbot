@@ -4,9 +4,10 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { spawnThread } from './drivers/claude.mjs';
 import { db, q } from './db.mjs';
-import { LOG_DIR, WORKSPACES, ROOT, CLAUDE_BIN, CCR_BIN, IDLE_EVICT_MS } from './config.mjs';
+import { LOG_DIR, WORKSPACES, ROOT, CLAUDE_BIN, CCR_BIN, IDLE_EVICT_MS, OWNER_IDS } from './config.mjs';
 import { systemHeader } from './identity.mjs';
 import { loadJob } from './jobfiles.mjs';
+import { sessionFile, readEntries, isFallback, modelName } from './transcript.mjs';
 
 export const CONDUCTOR_KEY = 'conductor';
 export const isJob = (key) => key.startsWith('job:');
@@ -15,9 +16,10 @@ export const isChat = (key) => key !== CONDUCTOR_KEY && !isJob(key);
 // thread_key -> live Thread (driver). Everything durable is in the threads table.
 const live = new Map();
 const turn = new Map(); // thread_key -> { busy, deliveries } : deliveries = batches injected during the current turn
-let notify = async () => {}; // (threadKey, text) => posts to Discord; set by gateway
+let notify = async () => {}; // (threadKey, text, { editId }?) => id of the posted or edited Discord message; set by gateway
 
 export function onNotify(fn) { notify = fn; }
+export const announce = (threadKey, text, editId) => notify(threadKey, text, { editId });
 
 export function workspaceFor(name) {
   const dir = path.join(WORKSPACES, name);
@@ -76,8 +78,19 @@ function start(row) {
     log.write(JSON.stringify({ at: new Date().toISOString(), spawn: { pid, resume, command } }) + '\n');
     console.log(`[${key}] spawned pid=${pid} resume=${resume} model=${row.model}${row.effort ? ` effort=${row.effort}` : ''}`);
   });
+  let warnedOnSpawn = false;
   thread.on('event', (e) => {
     log.write(JSON.stringify({ at: new Date().toISOString(), event: e }) + '\n');
+    // A fallback that core/recovery.mjs isn't handling: it predates the bot's start, or recovery is broken.
+    if (e.type === 'system' && e.subtype === 'init' && !warnedOnSpawn) {
+      warnedOnSpawn = true;
+      try {
+        const last = lastFallback(row.session_uuid);
+        if (last && e.model === last.fallbackModel && !q.repair.get(row.session_uuid)) warnStuck(key, last.originalModel, last.fallbackModel);
+      } catch (err) {
+        notify(key, `🚨 couldn't check this session for a model downgrade: ${err.message.slice(0, 300)}`).catch((x) => console.error('notify:', x.message));
+      }
+    }
     if (e.type === 'assistant' || e.type === 'result') q.touch.run(Date.now(), key);
     if (e.type === 'result') turn.set(key, { busy: false, deliveries: 0 });
   });
@@ -100,6 +113,19 @@ function start(row) {
   });
   live.set(key, thread);
   return thread;
+}
+
+// The CLI keeps a refusal-fallback session on the fallback model while the flagged content is in its transcript.
+function lastFallback(uuid) {
+  const file = sessionFile(uuid);
+  return file ? readEntries(file).entries.findLast(({ entry }) => isFallback(entry))?.entry ?? null : null;
+}
+
+function warnStuck(key, original, fallback) {
+  console.warn(`[${key}] resumed on fallback ${fallback} (wanted ${original}) with no recovery under way`);
+  notify(key, `## ⚠️ Stuck on ${modelName(fallback)}\n<@${OWNER_IDS[0]}> this session is answering on ${modelName(fallback)} instead of ` +
+    `${modelName(original)} after an earlier safety-classifier flag, and nothing is repairing it.`)
+    .catch((x) => console.error('notify:', x.message));
 }
 
 // Interrupt rules: an @mention of the bot, or a second batch arriving while the
