@@ -33,7 +33,7 @@ export function notice(source, text) { deliver(systemHeader(source), text); }
 
 export function drainInbox() {
   for (const row of q.inboxPending.all()) {
-    if (row.target) enqueue(row.target, { text: `${briefHeader()}\n${row.text}` });
+    if (row.target) enqueue(row.target, { text: `${briefHeader()}\n${row.text}`, passive: true });
     else deliver(reportHeader(row.source), row.text);
     q.inboxDelivered.run(Date.now(), row.id);
     mirror(row.target ? `📤 **brief → ${row.target}**\n${row.text}` : `📥 **${row.source}**\n${row.text}`).catch((e) => console.error('conductor mirror:', e.message));

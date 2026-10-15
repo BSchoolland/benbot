@@ -130,7 +130,8 @@ function warnStuck(key, original, fallback) {
 
 // Interrupt rules: an @mention of the bot, or a second batch arriving while the
 // agent is still busy with the current turn, cancels that turn before delivery.
-export async function deliver(threadKey, text, { mention = false } = {}) {
+// A batch of only passive items (conductor briefs) never interrupts; the agent sees it at its next tool call.
+export async function deliver(threadKey, text, { mention = false, passive = false } = {}) {
   const row = q.thread.get(threadKey);
   if (!row) throw new Error(`deliver: unknown thread ${threadKey}`);
   let thread = live.get(threadKey);
@@ -142,7 +143,7 @@ export async function deliver(threadKey, text, { mention = false } = {}) {
   }
   if (!thread) thread = start(row);
   const t = turn.get(threadKey) ?? { busy: false, deliveries: 0 };
-  if (t.busy && (mention || t.deliveries >= 1)) {
+  if (!passive && t.busy && (mention || t.deliveries >= 1)) {
     console.log(`[${threadKey}] interrupting current turn (${mention ? '@mention' : 'second message mid-turn'})`);
     await thread.interrupt().catch((e) => console.error(`[${threadKey}] interrupt failed:`, e.message));
     turn.set(threadKey, { busy: false, deliveries: 0 });

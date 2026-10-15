@@ -7,7 +7,8 @@ import { q } from './db.mjs';
 const pending = new Map(); // threadKey -> { items: [], timer, chain: Promise }
 
 export function enqueue(threadKey, item) {
-  // item: { text, msgId?, preface?, mention? } — preface goes once before the batch; mention = the bot was @'d
+  // item: { text, msgId?, preface?, mention?, passive? } — preface goes once before the batch; mention = the bot was @'d;
+  // passive = never interrupts a busy turn
   let p = pending.get(threadKey);
   if (!p) { p = { items: [], timer: null, chain: Promise.resolve() }; pending.set(threadKey, p); }
   p.items.push(item);
@@ -23,7 +24,7 @@ async function flush(threadKey) {
   const items = p.items.splice(0);
   const preface = items.find((i) => i.preface)?.preface;
   const text = [preface, ...items.map((i) => i.text)].filter(Boolean).join('\n');
-  await deliver(threadKey, text, { mention: items.some((i) => i.mention) });
+  await deliver(threadKey, text, { mention: items.some((i) => i.mention), passive: items.every((i) => i.passive) });
   const last = items.findLast((i) => i.msgId);
   if (last) q.setDelivered.run(last.msgId, threadKey);
 }
