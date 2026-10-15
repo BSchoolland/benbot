@@ -24,7 +24,7 @@ if (!env.DISCORD_TOKEN) throw new Error('DISCORD_TOKEN missing from .env');
 
 export const TOKEN = env.DISCORD_TOKEN;
 export const OWNER_IDS = (env.OWNER_IDS || '953441333601763358').split(',').map((s) => s.trim()).filter(Boolean);
-export const DEFAULT_MODEL = env.AGENT_MODEL || 'fable';
+export const DEFAULT_MODEL = env.AGENT_MODEL || 'opus';
 export const CLAUDE_BIN = env.CLAUDE_BIN || path.join(os.homedir(), '.local', 'bin', 'claude');
 export const CCR_BIN = env.CCR_BIN || path.join(os.homedir(), 'Projects', 'claude-router', 'bin', 'ccr');
 export const DEBOUNCE_MS = Number(env.DEBOUNCE_MS || 1500);
