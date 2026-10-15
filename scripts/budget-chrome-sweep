@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Close every page tab in the budget Chrome (CDP :9222), keep one fresh about:blank, re-measure after 30 s.
+
+Prints JSON with counts, target IDs and statuses only: never titles or URLs (they can carry tokens).
+"""
+import json, os, sys, time, urllib.request
+
+CDP = 'http://127.0.0.1:9222'
+PROFILE = '--user-data-dir=/home/ben/.budget/chrome-live'
+
+
+def cdp(path, method='GET'):
+    req = urllib.request.Request(CDP + path, method=method)
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return r.status, r.read().decode()
+
+
+def measure():
+    procs, vanished = {}, 0
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        try:
+            cmd = open(f'/proc/{name}/cmdline', 'rb').read().replace(b'\0', b' ').decode(errors='replace')
+            if 'chrome' not in cmd:
+                continue
+            ppid = int(open(f'/proc/{name}/stat').read().rsplit(')', 1)[1].split()[1])
+            status = dict(l.split(':', 1) for l in open(f'/proc/{name}/status') if ':' in l)
+        except (FileNotFoundError, ProcessLookupError):
+            vanished += 1
+            continue
+        procs[int(name)] = (ppid, cmd, int(status.get('VmRSS', '0 kB').split()[0]), int(status.get('VmSwap', '0 kB').split()[0]))
+    roots = [p for p, (pp, cmd, *_) in procs.items() if PROFILE in cmd and pp not in procs]
+    tree, stack = set(roots), list(roots)
+    while stack:
+        x = stack.pop()
+        for p, (pp, *_) in procs.items():
+            if pp == x and p not in tree:
+                tree.add(p)
+                stack.append(p)
+    return {'procs': len(tree), 'rss_mb': sum(procs[p][2] for p in tree) // 1024,
+            'swap_mb': sum(procs[p][3] for p in tree) // 1024, 'vanished_during_sample': vanished}
+
+
+def main():
+    out = {'before': measure()}
+    try:
+        status, _ = cdp('/json/version')
+    except Exception as e:
+        out['cdp'] = f'down: {type(e).__name__}: {e}'
+        print(json.dumps(out))
+        sys.exit(2)
+    out['cdp'] = f'ok ({status})'
+    pages = [t['id'] for t in json.loads(cdp('/json/list')[1]) if t['type'] == 'page']
+    status, body = cdp('/json/new?about:blank', method='PUT')
+    fresh = json.loads(body)['id']
+    out['new_tab'] = {'status': status, 'id': fresh}
+    closed, failed = [], []
+    for tid in pages:
+        try:
+            status, _ = cdp(f'/json/close/{tid}')
+            (closed if status == 200 else failed).append({'id': tid, 'status': status})
+        except Exception as e:
+            failed.append({'id': tid, 'error': f'{type(e).__name__}: {e}'})
+    out.update(pages_before=len(pages), closed=len(closed), failed=failed)
+    time.sleep(30)
+    out['pages_after'] = sum(1 for t in json.loads(cdp('/json/list')[1]) if t['type'] == 'page')
+    out['after_30s'] = measure()
+    print(json.dumps(out))
+
+
+main()

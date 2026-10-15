@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Nightly resource-hogs sample: full /proc inventory, grouped, compared to the latest snapshot on disk.
+
+Usage: resource-hogs-sample [--write] [--baseline PATH] [--out PATH]
+  prints JSON; --write saves state/resource-hogs/<date>.json (or --out PATH);
+  --baseline compares against PATH instead of the latest earlier snapshot.
+"""
+import collections, datetime, json, os, subprocess, sys
+from pathlib import Path
+
+STATE = Path('/home/ben/Projects/benbot/state/resource-hogs')
+TCK = os.sysconf('SC_CLK_TCK')
+NOW = datetime.datetime.now().astimezone()
+TODAY = NOW.date().isoformat()
+GROUP_MIN_MB = 300
+GROUP_MIN_CORES = 0.5
+
+
+def arg(name):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else None
+
+
+def run(cmd):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        return {'cmd': ' '.join(cmd), 'exit': p.returncode, 'out': p.stdout.strip()[:4000], 'err': p.stderr.strip()[:500]}
+    except FileNotFoundError as e:
+        return {'cmd': ' '.join(cmd), 'exit': None, 'out': '', 'err': f'not found: {e}'}
+    except subprocess.TimeoutExpired:
+        return {'cmd': ' '.join(cmd), 'exit': None, 'out': '', 'err': 'timeout'}
+
+
+def btime():
+    for line in open('/proc/stat'):
+        if line.startswith('btime '):
+            return int(line.split()[1])
+    raise RuntimeError('no btime in /proc/stat')
+
+
+def sample_procs():
+    boot = btime()
+    procs, vanished, errors = {}, [], []
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            stat = open(f'/proc/{pid}/stat').read()
+            comm = stat[stat.index('(') + 1:stat.rindex(')')]
+            f = stat.rsplit(')', 1)[1].split()
+            status = {}
+            for line in open(f'/proc/{pid}/status'):
+                k, _, v = line.partition(':')
+                status[k] = v.strip()
+            cgroup = open(f'/proc/{pid}/cgroup').read().strip().split('::')[-1]
+            cmdline = open(f'/proc/{pid}/cmdline', 'rb').read().replace(b'\0', b' ').decode(errors='replace').strip()
+        except (FileNotFoundError, ProcessLookupError):
+            vanished.append(pid)
+            continue
+        except Exception as e:
+            errors.append({'pid': pid, 'error': f'{type(e).__name__}: {e}'})
+            continue
+        start = datetime.datetime.fromtimestamp(boot + int(f[19]) // TCK).strftime('%Y-%m-%dT%H:%M:%S')
+        procs[pid] = {
+            'pid': pid, 'ppid': int(f[1]), 'comm': comm, 'cmd': cmdline[:240] or f'[{comm}]', 'start': start,
+            'cpu_s': round((int(f[11]) + int(f[12])) / TCK, 1),
+            'rss_mb': int(status.get('VmRSS', '0 kB').split()[0]) // 1024,
+            'swap_mb': int(status.get('VmSwap', '0 kB').split()[0]) // 1024,
+            'cgroup': cgroup,
+        }
+    return procs, vanished, errors
+
+
+def group_key(p, procs):
+    # A Chrome profile is one tree no matter which cgroup its renderers landed in.
+    if p['comm'] == 'chrome':
+        root = p
+        while root['ppid'] in procs and procs[root['ppid']]['comm'] == 'chrome':
+            root = procs[root['ppid']]
+        return f"chrome:{root['pid']}"
+    return p['cgroup']
+
+
+def load_baseline():
+    if arg('--baseline'):
+        path = Path(arg('--baseline'))
+        data = json.loads(path.read_text())
+        return data, {'path': str(path), 'date': data.get('taken', '')[:10], 'taken': data.get('taken')}
+    for path in sorted(STATE.glob('*.json'), reverse=True):
+        if path.stem >= TODAY:
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except Exception as e:
+            return None, {'path': str(path), 'error': f'{type(e).__name__}: {e}'}
+        return data, {'path': str(path), 'date': path.stem, 'taken': data.get('taken')}
+    return None, {'error': 'no earlier snapshot'}
+
+
+def baseline_index(data):
+    """(pid, start) -> cpu_s. 'full' when the baseline has the every-process index, else 'partial' (older
+    snapshots kept only above-threshold groups; whole-tree legacy totals are not comparable and are ignored)."""
+    if 'index' in data:
+        return {(pid, start): cpu for pid, start, cpu in data['index']}, 'full'
+    per_proc = {}
+
+    def walk(o):
+        if isinstance(o, dict):
+            if 'pid' in o and 'start' in o and 'cpu_s' in o:
+                per_proc[(o['pid'], o['start'])] = o['cpu_s']
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(data)
+    return per_proc, 'partial'
+
+
+def main():
+    inventory = {k: run(c) for k, c in {
+        'free': ['free', '-m'], 'uptime': ['uptime'],
+        'virsh': ['virsh', 'list', '--all'],
+        'docker_ps': ['docker', 'ps', '--no-trunc', '--format', '{{.ID}} {{.Names}} {{.Status}}'],
+        'docker_stats': ['docker', 'stats', '--no-stream', '--format', '{{.Name}} {{.CPUPerc}} {{.MemUsage}}'],
+        'multipass': ['/snap/bin/multipass', 'list'],
+    }.items()}
+    incomplete = [f"{k}: {v['err'] or 'exit ' + str(v['exit'])}" for k, v in inventory.items() if v['exit'] != 0]
+
+    procs, vanished, errors = sample_procs()
+    containers = {}
+    for line in inventory['docker_ps']['out'].splitlines():
+        cid, name, *_ = line.split()
+        containers[cid] = name
+
+    groups = collections.defaultdict(list)
+    for p in procs.values():
+        groups[group_key(p, procs)].append(p)
+
+    baseline, base_meta = load_baseline()
+    per_proc, index_kind = baseline_index(baseline) if baseline else ({}, None)
+    elapsed_s = None
+    if baseline and baseline.get('taken'):
+        elapsed_s = int((NOW - datetime.datetime.fromisoformat(baseline['taken'])).total_seconds())
+
+    out_groups = []
+    for key, members in groups.items():
+        rss = sum(p['rss_mb'] for p in members)
+        swap = sum(p['swap_mb'] for p in members)
+        cpu = sum(p['cpu_s'] for p in members)
+        roots = [p for p in members if p['ppid'] not in {m['pid'] for m in members}]
+        root = min(roots, key=lambda p: p['start'])
+        label = key
+        for cid, name in containers.items():
+            if cid in key:
+                label = f'docker:{name}'
+        g = {'key': key, 'label': label, 'root': {'pid': root['pid'], 'ppid': root['ppid'], 'start': root['start'], 'cmd': root['cmd']},
+             'procs_n': len(members), 'rss_mb': rss, 'swap_mb': swap, 'cpu_s': round(cpu, 1)}
+        matched = [(p, per_proc[(p['pid'], p['start'])]) for p in members if (p['pid'], p['start']) in per_proc]
+        if matched:
+            unmatched = [p for p in members if (p['pid'], p['start']) not in per_proc]
+            d = round(sum(p['cpu_s'] - c for p, c in matched), 1)
+            g['delta'] = {'coverage': 'full' if not unmatched else 'partial',
+                          'matched_procs': len(matched), 'unmatched_procs': len(unmatched),
+                          'matched_cpu_s': d, 'unmatched_lifetime_cpu_s': round(sum(p['cpu_s'] for p in unmatched), 1),
+                          'matched_cores': round(d / elapsed_s, 3) if elapsed_s else None}
+        else:
+            g['delta'] = {'coverage': 'unavailable', 'reason': 'no matching pid/start in baseline' if baseline else 'no baseline'}
+        busy = (g['delta'].get('matched_cores') or 0) >= GROUP_MIN_CORES
+        if rss + swap >= GROUP_MIN_MB or busy:
+            g['procs'] = [{k: p[k] for k in ('pid', 'ppid', 'start', 'cpu_s', 'rss_mb', 'swap_mb', 'cmd')}
+                          for p in sorted(members, key=lambda p: -p['rss_mb'])]
+            out_groups.append(g)
+    out_groups.sort(key=lambda g: -(g['rss_mb'] + g['swap_mb']))
+
+    snap = {
+        'taken': NOW.isoformat(timespec='seconds'),
+        'baseline': {**base_meta, 'elapsed_s': elapsed_s} if baseline else {**base_meta, 'comparison': 'unavailable'},
+        'sample': {'procs': len(procs), 'vanished_during_sample': len(vanished), 'read_errors': errors},
+        'incomplete_checks': incomplete,
+        'inventory': {k: {'exit': v['exit'], 'out': v['out'], 'err': v['err']} for k, v in inventory.items()},
+        'index': sorted([p['pid'], p['start'], p['cpu_s']] for p in procs.values()),
+        'baseline_index': index_kind,
+        'totals': {'rss_mb': sum(p['rss_mb'] for p in procs.values()), 'swap_mb': sum(p['swap_mb'] for p in procs.values())},
+        'groups': out_groups,
+    }
+    if '--write' in sys.argv:
+        path = Path(arg('--out')) if arg('--out') else STATE / f'{TODAY}.json'
+        path.write_text(json.dumps(snap, indent=1))
+        print(f'wrote {path}', file=sys.stderr)
+    json.dump(snap, sys.stdout, indent=1)
+
+
+main()
