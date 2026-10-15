@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Set the model and effort a thread's agent runs as, from its next turn on.
-//   discord-model <thread_id> <model> [effort]      model: fable | opus | sonnet | gpt-5.6-sol | gpt-6-astra | any model id
+//   discord-model <thread_id> <model> [effort]      model: fable | opus | sonnet | gpt-5.6-sol | gpt-6-astra | glm-5.3 | any model id
 //   discord-model <thread_id> --effort <effort>     effort: low | medium | high | xhigh | max | default
 //   discord-model <thread_id> --show
 //   discord-model <thread_id> --clear               back to the channel's model, default effort

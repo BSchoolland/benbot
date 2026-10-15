@@ -67,7 +67,7 @@ function logStream(threadKey) {
 
 function start(row) {
   const resume = sessionFileExists(row.session_uuid);
-  const bin = /^gpt-|astra/.test(row.model) ? CCR_BIN : CLAUDE_BIN;
+  const bin = /^(claude-|fable|opus|sonnet|haiku)/.test(row.model) ? CLAUDE_BIN : CCR_BIN;
   const thread = spawnThread(row.session_uuid, { model: row.model, cwd: cwdFor(row), bin, resume, env: { BENBOT_THREAD: row.thread_key, PATH: `${path.join(ROOT, 'scripts')}:${process.env.PATH}` },
     args: row.effort ? ['--effort', row.effort] : [] });
   thread.spec = { model: row.model, effort: row.effort || null };

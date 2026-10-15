@@ -71,19 +71,19 @@ async function onMessage(msg) {
     if (!q.identity.get(msg.author.id) || !conductor.ensure()) return;
     threadKey = sessions.CONDUCTOR_KEY; guildId = msg.guildId; channelId = msg.channelId; model = conductor.ensure().model;
   } else if (msg.channel.isThread()) {
-    const watched = q.channel.get(msg.channel.parentId);
-    if (!watched && !mentioned && !q.thread.get(msg.channelId)) return;
-    threadKey = msg.channelId; guildId = msg.guildId; channelId = msg.channel.parentId; model = watched?.model || DEFAULT_MODEL;
+    const parent = q.channel.get(msg.channel.parentId);
+    if (parent?.mode !== 'threads' && !mentioned && !q.thread.get(msg.channelId)) return;
+    threadKey = msg.channelId; guildId = msg.guildId; channelId = msg.channel.parentId; model = parent?.model || DEFAULT_MODEL;
     threadName = msg.channel.name;
   } else {
-    const watched = q.channel.get(msg.channelId);
-    if (!mentioned && !(watched && q.identity.get(msg.author.id))) return;
+    const channel = q.channel.get(msg.channelId);
+    if (!mentioned && !(channel?.mode === 'threads' && q.identity.get(msg.author.id))) return;
     let thread = msg.hasThread ? msg.thread : null;
     if (!thread) {
       const name = (msg.content || '').replace(/<[@#][!&]?\d+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'chat';
       thread = await msg.startThread({ name });
     }
-    threadKey = thread.id; guildId = msg.guildId; channelId = msg.channelId; model = watched?.model || DEFAULT_MODEL;
+    threadKey = thread.id; guildId = msg.guildId; channelId = msg.channelId; model = channel?.model || DEFAULT_MODEL;
     threadName = thread.name;
   }
 

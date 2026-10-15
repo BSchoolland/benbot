@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS inbox (      -- reports from sessions to the conducto
 );
 `);
 if (!db.prepare("PRAGMA table_info(channels)").all().some((c) => c.name === 'mode')) {
-  db.exec("ALTER TABLE channels ADD COLUMN mode TEXT NOT NULL DEFAULT 'threads'"); // threads | conductor | sms
+  db.exec("ALTER TABLE channels ADD COLUMN mode TEXT NOT NULL DEFAULT 'threads'"); // threads | mention | conductor | sms  (mention: not watched, only sets the model @mentions there run on)
 }
 if (!db.prepare("PRAGMA table_info(inbox)").all().some((c) => c.name === 'target')) {
   db.exec('ALTER TABLE inbox ADD COLUMN target TEXT'); // null = the conductor; a thread key = a brief from the conductor (scripts/brief)

@@ -3,6 +3,7 @@
 //   channels list
 //   channels watch <channel_id> <guild_id> [model] [name]
 //   channels unwatch <channel_id>
+//   channels model <channel_id> <guild_id> <model> [name]   (not watched: just the model @mentions there run on)
 //   channels conductor <channel_id> <guild_id> [model]   (the conductor's own channel; talk to it there)
 //   channels sms <channel_id> <guild_id>                   (Ben's forwarded texts land here; see scripts/sms)
 import { db, q } from '../core/db.mjs';
@@ -10,6 +11,7 @@ const [cmd, ...a] = process.argv.slice(2);
 const run = {
   list() { for (const r of db.prepare('SELECT * FROM channels').all()) console.log(`${r.channel_id}  guild ${r.guild_id}  ${r.mode}  model ${r.model ?? '(default)'}  ${r.name ?? ''}`); },
   watch: (ch, guild, model = null, name = null) => db.prepare('INSERT INTO channels (channel_id, guild_id, model, name) VALUES (?, ?, ?, ?) ON CONFLICT(channel_id) DO UPDATE SET guild_id=excluded.guild_id, model=excluded.model, name=excluded.name').run(ch, guild, model, name),
+  model: (ch, guild, model, name = null) => db.prepare("INSERT INTO channels (channel_id, guild_id, model, name, mode) VALUES (?, ?, ?, ?, 'mention') ON CONFLICT(channel_id) DO UPDATE SET guild_id=excluded.guild_id, model=excluded.model, name=excluded.name, mode='mention'").run(ch, guild, model, name),
   unwatch: (ch) => db.prepare('DELETE FROM channels WHERE channel_id = ?').run(ch),
   sms: (ch, guild) => db.prepare("INSERT INTO channels (channel_id, guild_id, name, mode) VALUES (?, ?, 'sms', 'sms') ON CONFLICT(channel_id) DO UPDATE SET guild_id=excluded.guild_id, mode='sms', name='sms'").run(ch, guild),
   conductor(ch, guild, model = 'opus') {
