@@ -22,6 +22,9 @@ if "--json" in sys.argv:
     sys.exit()
 now = datetime.now(timezone.utc)
 for name, l in rows:
+    if l["resets_at"] is None:
+        print(f"{name:13} {l['percent']:3d}%  window not started")
+        continue
     reset = datetime.fromisoformat(l["resets_at"])
     mins = int((reset - now).total_seconds() // 60)
     left = f"{mins//60}h{mins%60:02d}m" if mins >= 60 else f"{mins}m"
