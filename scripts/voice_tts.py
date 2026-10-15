@@ -1,16 +1,19 @@
 """Turn a reply into audio for a voice-bound thread.
 
 The bot owns the call and the player; everything about *how* a reply sounds
-lives here. `speak()` synthesises the text with OpenAI TTS, runs it through
+lives here. `speak()` synthesises the text with OpenAI or xAI TTS (picked by
+voice name), runs it through
 an ffmpeg filtergraph or a shell pipe, and drops the finished 48kHz stereo
 s16le PCM into `state/voice/<thread_id>/`, which the bot watches and plays in
 filename order. Editing this file never needs a bot restart.
 
 Leading tags on a message override the defaults for that one reply:
-  [voice:name]   OpenAI TTS voice          (default DISCORD_TTS_VOICE, else ash)
-  [style:text]   TTS delivery instructions (default DISCORD_TTS_INSTRUCTIONS)
+  [voice:name]   TTS voice; XAI_VOICES go to xAI, the rest to OpenAI
+                 (default DISCORD_TTS_VOICE, else ash)
+  [style:text]   OpenAI delivery instructions; xAI has no equivalent
+                 (default DISCORD_TTS_INSTRUCTIONS)
   [fx:graph]     ffmpeg -af filtergraph    (default DISCORD_TTS_FX)
-  [pipe:cmd]     shell command: opus on stdin, 48kHz stereo s16le on stdout,
+  [pipe:cmd]     shell command: encoded audio on stdin, 48kHz stereo s16le on stdout,
                  run from the benbot root (default DISCORD_TTS_PIPE; wins over fx)
 A tag's value runs to the first `]` followed by whitespace, so fx graphs may
 contain pad labels like `[a][b]amix`.
@@ -33,6 +36,7 @@ TTS_MAX_CHARS = 4000
 # gpt-4o-mini-tts ignores `speed`; pace is steered through `instructions`.
 INSTRUCTIONS_DEFAULT = ("Speak at a brisk, natural conversational pace, like a quick-witted "
                         "teammate on a call. No slow, careful enunciation.")
+XAI_VOICES = {"eve", "ara", "rex", "sal", "leo"}
 TAG_RE = re.compile(r"^\[(voice|style|fx|pipe):(.+?)\](?:\s+|$)", re.I | re.S)
 
 
@@ -94,13 +98,21 @@ def chunks(text):
     return out
 
 
-def synthesize(text, voice, instructions, api_key):
-    """Opus bytes from OpenAI TTS."""
+def synthesize(text, voice, instructions, e):
+    """Encoded audio bytes (opus from OpenAI, mp3 from xAI)."""
+    if voice in XAI_VOICES:
+        url, key = "https://api.x.ai/v1/tts", "XAI_API_KEY"
+        body = {"text": text, "voice_id": voice, "language": "en",
+                "output_format": {"codec": "mp3", "sample_rate": 48000}}
+    else:
+        url, key = "https://api.openai.com/v1/audio/speech", "OPENAI_API_KEY"
+        body = {"model": TTS_MODEL, "voice": voice, "instructions": instructions,
+                "input": text, "response_format": "opus"}
+    if not e.get(key):
+        raise RuntimeError(f"{key} not set in {ENV_PATH}")
     req = urllib.request.Request(
-        "https://api.openai.com/v1/audio/speech",
-        data=json.dumps({"model": TTS_MODEL, "voice": voice, "instructions": instructions,
-                         "input": text, "response_format": "opus"}).encode(),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        url, data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {e[key]}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -110,7 +122,7 @@ def synthesize(text, voice, instructions, api_key):
         raise RuntimeError(f"TTS HTTP {e.code}: {e.read().decode()[:200]}") from None
 
 
-def to_pcm(opus, fx=None, pipe=None):
+def to_pcm(audio, fx=None, pipe=None):
     """48kHz stereo s16le, what the bot's player takes as raw."""
     if pipe:
         cmd, shell = pipe, True
@@ -120,7 +132,7 @@ def to_pcm(opus, fx=None, pipe=None):
             cmd += ["-af", fx]
         cmd += ["-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"]
         shell = False
-    p = subprocess.run(cmd, shell=shell, cwd=BOT_DIR, input=opus, capture_output=True)
+    p = subprocess.run(cmd, shell=shell, cwd=BOT_DIR, input=audio, capture_output=True)
     if p.returncode:
         what = "pipe" if pipe else "ffmpeg"
         raise RuntimeError(f"{what} exit {p.returncode}: {p.stderr.decode().strip()[:300]}")
@@ -145,9 +157,6 @@ def speak(thread_id, content):
     """
     text, opts = parse_tags(content)
     e = env()
-    api_key = e.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not set in " + str(ENV_PATH))
     voice = opts.get("voice") or e.get("DISCORD_TTS_VOICE") or "ash"
     instructions = opts.get("instructions") or e.get("DISCORD_TTS_INSTRUCTIONS") or INSTRUCTIONS_DEFAULT
     fx = opts.get("fx") or e.get("DISCORD_TTS_FX") or None
@@ -155,7 +164,7 @@ def speak(thread_id, content):
     if not is_voice_thread(thread_id):
         raise RuntimeError(f"thread {thread_id} is not voice-bound (no {drop_dir(thread_id)})")
     for i, chunk in enumerate(chunks(speakable(text))):
-        drop(thread_id, to_pcm(synthesize(chunk, voice, instructions, api_key), fx, pipe), i)
+        drop(thread_id, to_pcm(synthesize(chunk, voice, instructions, e), fx, pipe), i)
     return text
 
 
