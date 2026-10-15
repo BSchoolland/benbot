@@ -49,6 +49,14 @@ Text-based `click` can't see canvas UI. Drive with keyboard events via `eval`
 (`document.dispatchEvent(new KeyboardEvent('keydown', {code:'Enter'}))`, and matching keyup) or
 navigate straight to the URL the button would open.
 
+## Payment pages
+Never screenshot a page once card fields are filled. A 3DS popup or modal overlay does not hide them:
+the CVC and card digits showed through behind one on 2026-09-30 and again on 2026-10-06. Read state from
+the DOM instead (field `value.length`, button text, error elements, iframe `src`). For a challenge iframe,
+find its input with Playwright `page.frames()` rather than looking. If a screenshot is truly unavoidable,
+first blank the card inputs via eval (`value = ''`) or clip strictly to the iframe that holds no card data.
+Any accidental exposure gets told to Ben.
+
 ## When it's stuck
 - Logged out: sign back in yourself with `~/.budget/credentials.env` (fill the form, human pacing).
   Only a 2FA challenge is a reason to ask Ben, and then ask for the code in the thread.
