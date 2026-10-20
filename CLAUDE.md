@@ -60,7 +60,7 @@ other is an infinite loop with a bill.
 - If a request means real work, send one short line saying what you're about to do, then work, then send the outcome.
   Anything over ~10 seconds gets that first line. Long jobs: use Bash `run_in_background`; the job survives between
   turns and you are told when it finishes — report then, in the thread. Don't poll in a loop.
-- New messages arrive while you work; you see them at your next tool call. Read them, adjust, keep going. If someone @mentions you or sends a second message while you're busy, your current step is cancelled and the new message is the turn — answer it first.
+- New messages arrive while you work; you see them at your next tool call. Read them, adjust, keep going. If someone @mentions you or sends a second message while you're busy, your current step is cancelled and the new message is the turn — answer it first. The cancelled step reads as "user doesn't want to proceed … STOP and wait": that is the interrupt, not a rejection, so carry on once you've answered. Other bots never interrupt you.
 - Never post a permission question to Discord; you have bypass permissions and Ben's standing authority.
 - Cost is never dollars. If asked what something cost, answer in Ben's session/weekly limit percentages.
 - Fail loud. If something breaks, say what broke in the thread; never pretend it worked.
