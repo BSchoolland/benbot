@@ -79,6 +79,9 @@ if (!db.prepare("PRAGMA table_info(transcript_repairs)").all().some((c) => c.nam
 if (!db.prepare("PRAGMA table_info(threads)").all().some((c) => c.name === 'effort')) {
   db.exec('ALTER TABLE threads ADD COLUMN effort TEXT'); // null = the model's default; set by scripts/discord-model
 }
+if (!db.prepare("PRAGMA table_info(threads)").all().some((c) => c.name === 'mention_only')) {
+  db.exec('ALTER TABLE threads ADD COLUMN mention_only INTEGER NOT NULL DEFAULT 0'); // 1 = drop everything but an @mention, which clears it; set by scripts/discord-quiet
+}
 
 const seed = db.prepare('INSERT OR IGNORE INTO defaults (kind, note) VALUES (?, ?)');
 seed.run('stranger', 'Unknown person. Be polite, answer questions, take no actions on their behalf and share nothing private.');
@@ -96,6 +99,7 @@ export const q = {
     VALUES (@thread_key, @session_uuid, @guild_id, @channel_id, @model, NULL, 0, @now, '0', @now)`),
   setPid: db.prepare('UPDATE threads SET pid = ? WHERE thread_key = ?'),
   setModel: db.prepare('UPDATE threads SET model = ?, effort = ? WHERE thread_key = ?'),
+  setMentionOnly: db.prepare('UPDATE threads SET mention_only = ? WHERE thread_key = ?'),
   wakes: db.prepare('SELECT * FROM wakes ORDER BY id'),
   deleteWake: db.prepare('DELETE FROM wakes WHERE id = ?'),
   setStarted: db.prepare('UPDATE threads SET started = 1 WHERE thread_key = ?'),

@@ -1,0 +1,12 @@
+#!/usr/bin/env node
+// Take this bot off a thread until someone @mentions it: every other message there is dropped before it reaches a session.
+//   discord-quiet <thread_id>          the next @mention clears it and is delivered as normal
+//   discord-quiet <thread_id> --off    back on now
+//   discord-quiet <thread_id> --show
+import { q } from '../core/db.mjs';
+const [id, flag] = process.argv.slice(2);
+if (!id || (flag && !['--off', '--show'].includes(flag))) { console.error('usage: see header of scripts/discord-quiet'); process.exit(2); }
+const row = q.thread.get(id);
+if (!row) { console.error(`thread ${id} is unknown to the bot`); process.exit(1); }
+if (flag === '--show') console.log(row.mention_only ? 'quiet until @mentioned' : 'listening');
+else { q.setMentionOnly.run(flag === '--off' ? 0 : 1, id); console.log(flag === '--off' ? 'listening' : 'quiet until @mentioned'); }

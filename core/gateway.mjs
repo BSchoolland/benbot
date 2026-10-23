@@ -87,10 +87,18 @@ async function onMessage(msg) {
     threadName = thread.name;
   }
 
+  let unmuted = false;
+  if (q.thread.get(threadKey)?.mention_only) {
+    if (!mentioned) return;
+    q.setMentionOnly.run(0, threadKey);
+    unmuted = true;
+  }
+
   sessions.ensureThread({ threadKey, guildId, channelId, model });
   const h = header({ discordId: msg.author.id, displayName: msg.author.globalName || msg.author.username, isBot: msg.author.bot, guildId,
     guildName: msg.guild?.name, channelName: isDM ? null : (msg.channel.parent?.name || msg.channel.name), isDM });
-  const item = { text: `${h.line}\n${lineFor(msg)}`, msgId: msg.id, mention: mentioned };
+  const muteNote = unmuted ? `${systemHeader('unmuted')} You were off this chat (discord-quiet) and this @mention brings you back; discord-read the thread for what you missed.\n` : '';
+  const item = { text: `${muteNote}${h.line}\n${lineFor(msg)}`, msgId: msg.id, mention: mentioned };
   if (!sessions.isStarted(threadKey)) {
     item.preface = threadKey === sessions.CONDUCTOR_KEY ? conductor.preface() : preface(threadKey, whereOf(msg, isDM, threadName), { voice: !!voice.sessionFor(threadKey) });
     if (sessions.isChat(threadKey)) {
