@@ -163,6 +163,8 @@ for (const name of Object.keys(PROVIDERS)) {
 }
 if (failures.length) {
   execFileSync(path.join(ROOT, 'scripts/report'), ['--from', 'renew-logins',
-    `Auto re-login through Chrome failed; tell Ben, these lapse soon without a manual login:\n${failures.join('\n')}`]);
+    `Auto re-login through Chrome failed; these lapse soon without a login:\n${failures.join('\n')}\n\n` +
+    'Have a sub agent fix it: finish the sign-in in the budget Chrome with the browse-as-ben skill, then confirm with ' +
+    '`scripts/renew-logins --force <name>` for each failed login. Escalate to @Ben only if it needs him (2FA, a password, or the agent can\'t get through).']);
   process.exit(1);
 }
