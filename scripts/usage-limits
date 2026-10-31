@@ -14,9 +14,11 @@ def bucket(kind, scope=None):
     for l in data["limits"]:
         if l["kind"] == kind and (scope is None or (l.get("scope") or {}).get("model", {}).get("display_name") == scope):
             return l
-    raise SystemExit(f"limit {kind}/{scope} missing from usage response: {data['limits']}")
 
-rows = [("5h session", bucket("session")), ("weekly all", bucket("weekly_all")), ("weekly Fable", bucket("weekly_scoped", "Fable"))]
+rows = [(name, l) for name, l in [("5h session", bucket("session")), ("weekly all", bucket("weekly_all")),
+                                  ("weekly Fable", bucket("weekly_scoped", "Fable"))] if l]
+if not rows:
+    raise SystemExit(f"no known limits in usage response: {data['limits']}")
 if "--json" in sys.argv:
     print(json.dumps({k: {"percent": v["percent"], "resets_at": v["resets_at"]} for k, v in rows}))
     sys.exit()

@@ -21,10 +21,9 @@ PRICE = {
 }
 HERE = os.path.dirname(os.path.abspath(__file__))
 limits = json.loads(subprocess.check_output([os.path.join(HERE, "usage-limits"), "--json"]))
-windows = {
-    "5h session": (datetime.fromisoformat(limits["5h session"]["resets_at"]) - timedelta(hours=5), limits["5h session"]["percent"]),
-    "weekly all": (datetime.fromisoformat(limits["weekly all"]["resets_at"]) - timedelta(days=7), limits["weekly all"]["percent"]),
-}
+spans = {"5h session": timedelta(hours=5), "weekly all": timedelta(days=7)}
+windows = {name: (datetime.fromisoformat(limits[name]["resets_at"]) - span, limits[name]["percent"])
+           for name, span in spans.items() if name in limits}
 earliest = min(w[0] for w in windows.values())
 
 seen = {}
