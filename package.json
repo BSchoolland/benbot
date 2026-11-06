@@ -3,19 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "BenBot \u2014 a Discord-resident agent that acts on Ben's behalf. One long-lived claude process per thread.",
+  "description": "BenBot — a Discord-resident agent that acts on Ben's behalf. One long-lived claude process per thread.",
   "scripts": {
     "start": "node core/index.mjs",
     "check": "for f in core/*.mjs core/drivers/*.mjs; do node --check $f || exit 1; done"
   },
   "license": "MIT",
   "dependencies": {
-    "better-sqlite3": "^13.0.3",
-    "discord.js": "^14.27.0",
     "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.2",
     "@snazzah/davey": "^0.1.12",
+    "better-sqlite3": "^13.0.3",
+    "discord.js": "^14.27.0",
     "prism-media": "^1.3.5",
+    "semver": "^7.8.6",
     "sodium-native": "^5.1.0"
   }
 }
