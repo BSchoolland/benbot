@@ -179,7 +179,11 @@ for (const { h, inv, err } of inventories) {
     idLists.forEach((ids, i) => {
       for (const id of ids) {
         const v = details[id], j = judged[id];
-        record({ host: h.name, kind: 'vuln', ...where[i], vuln: id, cves: j.cves, score: j.score, kev: j.kev, summary: (v.summary ?? v.details ?? '').slice(0, 200), fixed: fixedFor(v, where[i].pkg, where[i].ecosystem) });
+        const fixed = fixedFor(v, where[i].pkg, where[i].ecosystem);
+        // OSV ignores RPM module streams: a perl:5.32 advisory matches perl 5.26 packages. Different modularity = different stream.
+        const modular = (ver) => /\.module[_+]/.test(ver);
+        if (fixed.length && fixed.every((f) => modular(f) !== modular(where[i].version))) continue;
+        record({ host: h.name, kind: 'vuln', ...where[i], vuln: id, cves: j.cves, score: j.score, kev: j.kev, summary: (v.summary ?? v.details ?? '').slice(0, 200), fixed });
       }
     });
 
