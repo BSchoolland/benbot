@@ -66,20 +66,98 @@ def rpm_pkgs():
     major = inv["os"]["version_id"].split(".")[0]
     eco = {"almalinux": "AlmaLinux", "rocky": "Rocky Linux"}.get(inv["os"]["id"], inv["os"]["id"])
     inv["os_pkgs"] = {"ecosystem": "%s:%s" % (eco, major), "pkgs": sorted(pkgs.items()), "foreign": []}
+    streams = []
+    for line in sh("dnf -C -q module list --enabled").splitlines():
+        m = re.match(r"^(\w[\w-]*)\s+([^\s\[]+)\s+(?:\[\w\])*\[e\]", line)
+        if m:
+            streams.append("%s:%s" % m.groups())
+    inv["module_streams"] = sorted(set(streams))
+
+
+def pm2_daemons():
+    """Every running pm2 God Daemon, whoever owns it: (user, pm2_home, node binary, pm2 script)."""
+    out = []
+    for line in sh("ps -eo pid=,user:64=,args=").splitlines():
+        m = re.match(r"\s*(\d+)\s+(\S+)\s+PM2 v[\d.]+: God Daemon \((.+)\)$", line)
+        if not m:
+            continue
+        pid, user, home = m.groups()
+        # After a node upgrade under a running daemon the link reads "/usr/bin/node (deleted)"; the path holds the new binary.
+        node = os.readlink("/proc/%s/exe" % pid)
+        if node.endswith(" (deleted)"):
+            node = node[:-len(" (deleted)")]
+        script = None
+        try:
+            unit = sh("systemctl cat pm2-%s 2>/dev/null" % user)
+            u = re.search(r"^ExecStart=(\S*pm2)\s", unit, re.M)
+            script = u and u.group(1)
+        except Exception:
+            pass
+        script = script or shutil.which("pm2")
+        if not script:
+            raise RuntimeError("pm2 daemon for %s at %s but no pm2 CLI found" % (user, home))
+        out.append((user, home, node, os.path.realpath(script)))
+    return out
+
+
+def listeners():
+    """TCP ports listening on a non-loopback address, with the owning process."""
+    out = set()
+    for line in sh("ss -Hltnp").splitlines():
+        f = line.split()
+        addr, port = f[3].rsplit(":", 1)
+        if addr.startswith("127.") or addr in ("[::1]", "::1"):
+            continue
+        m = re.search(r'users:\(\("([^"]+)"', line)
+        out.add((int(port), m.group(1) if m else ""))
+    inv["listeners"] = sorted(out)
+    addrs = []
+    for line in sh("ip -o addr show scope global").splitlines():
+        a = line.split()[3].split("/")[0]
+        if not re.match(r"^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|f[cd])", a):
+            addrs.append(a)
+    inv["public_addrs"] = addrs
+
+
+def stale_processes():
+    """Processes still running code that has been replaced on disk: patched, but not yet in effect."""
+    stale = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            exe = os.readlink("/proc/%s/exe" % pid)
+            with open("/proc/%s/maps" % pid) as f:
+                libs = {l.split(None, 5)[5].strip() for l in f if l.rstrip().endswith("(deleted)") and ".so" in l}
+            with open("/proc/%s/comm" % pid) as f:
+                comm = f.read().strip()
+        except (OSError, IndexError):
+            continue  # process exited or kernel thread
+        gone = sorted(([exe] if exe.endswith("(deleted)") else []) + [l for l in libs if not l.startswith("/memfd:")])
+        if gone:
+            stale.setdefault(comm, set()).update(gone)
+    inv["stale"] = sorted([c, sorted(g)] for c, g in stale.items())
 
 
 def pm2_apps():
     apps = []
-    for pm2 in ("pm2",):
-        try:
-            out = sh("%s jlist" % pm2)
-        except Exception:
-            continue
+    for user, home, node, script in pm2_daemons():
+        out = sh("sudo -u %s env PM2_HOME=%s PATH=%s:/usr/bin:/bin %s %s jlist"
+                 % (user, home, os.path.dirname(node), node, script))
         start = out.find("[")
         for p in json.loads(out[start:]):
             env = p.get("pm2_env", {})
-            apps.append({"name": p.get("name"), "cwd": env.get("pm_cwd"),
-                         "interpreter": env.get("exec_interpreter"), "status": env.get("status")})
+            # The live process's binary is the truth: pm2 reports "none" for bun shebang scripts and a bare "node" whose PATH differs per user.
+            interp = env.get("exec_interpreter")
+            if p.get("pid"):
+                try:
+                    interp = os.readlink("/proc/%s/exe" % p["pid"]).replace(" (deleted)", "")
+                except OSError:
+                    pass  # exited between jlist and here; keep pm2's own value
+            elif interp == "node":
+                interp = node
+            apps.append({"name": p.get("name"), "user": user, "cwd": env.get("pm_cwd"),
+                         "interpreter": interp, "status": env.get("status")})
     inv["pm2"] = apps
 
 
@@ -201,4 +279,6 @@ step("node", node_runtimes)
 step("npm", npm_apps)
 step("wordpress", wordpress)
 step("containers", containers)
+step("stale processes", stale_processes)
+step("listeners", listeners)
 print(json.dumps(inv))

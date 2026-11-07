@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
+import net from 'node:net';
 import semver from 'semver';
 import { cvss3 } from './cvss.mjs';
 
@@ -67,6 +68,27 @@ const KEV = new Set((await cached('kev.json', 3 * 3600e3, () =>
   http('https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json'))).vulnerabilities.map((v) => v.cveID));
 const NODE_VULNS = Object.values(await cached('node-core-vulns.json', 3 * 3600e3, () =>
   http('https://raw.githubusercontent.com/nodejs/security-wg/main/vuln/core/index.json')));
+// Bun publishes advisories only as GitHub repository advisories (not in OSV under any ecosystem).
+const BUN_VULNS = await cached('bun-advisories.json', 3 * 3600e3, () =>
+  http('https://api.github.com/repos/oven-sh/bun/security-advisories?per_page=100'));
+// Debian's own triage of each CVE per release: whether a "no fixed version" Debian finding is accepted (unimportant,
+// no-dsa, postponed) or genuinely waiting. Trimmed to {srcpkg: {cve: {codename: [status, urgency, nodsa_reason, fixed]}}}.
+const DEBIAN_CODENAMES = { 11: 'bullseye', 12: 'bookworm', 13: 'trixie' };
+const DEBIAN_TRACKER = await cached('debian-tracker.json', 24 * 3600e3, async () => {
+  const full = await http('https://security-tracker.debian.org/tracker/data/json');
+  const keep = new Set(Object.values(DEBIAN_CODENAMES));
+  const out = {};
+  for (const [pkg, cves] of Object.entries(full)) {
+    for (const [cve, v] of Object.entries(cves)) {
+      for (const [rel, r] of Object.entries(v.releases ?? {})) {
+        if (!keep.has(rel)) continue;
+        ((out[pkg] ??= {})[cve] ??= {})[rel] = [r.status, r.urgency, r.nodsa_reason || ('nodsa' in r ? 'no-dsa' : null), r.fixed_version ?? null];
+      }
+    }
+  }
+  return out;
+});
+const dpkgLess = (a, b) => { try { execFileSync('dpkg', ['--compare-versions', a, 'lt', b]); return true; } catch (e) { if (e.status === 1) return false; throw e; } };
 const NODE_SCHEDULE = await cached('node-schedule.json', 24 * 3600e3, () =>
   http('https://raw.githubusercontent.com/nodejs/Release/main/schedule.json'));
 
@@ -131,6 +153,14 @@ function wpAffected(ver, op) {
 }
 const wpFeed = (kind, slug) => cached(`wp-${kind}-${slug}.json`, 3 * 3600e3, () => http(`https://www.wpvulnerability.net/${kind}/${slug}/`));
 
+// ---------- exposure ----------
+// Connect from here to every non-loopback listener; anything reachable that the host doesn't list as public is a finding.
+const reachable = (host, port) => new Promise((resolve) => {
+  const sock = net.connect({ host, port, timeout: 4000 });
+  const done = (ok) => { sock.destroy(); resolve(ok); };
+  sock.once('connect', () => done(true)).once('timeout', () => done(false)).once('error', () => done(false));
+});
+
 // ---------- scan ----------
 const hosts = readJson(path.join(HERE, 'hosts.json'));
 const findings = readJson(path.join(STATE, 'findings.json'), {});
@@ -144,7 +174,7 @@ function record(f) {
   seen.add(key);
   // A distro CVE the release itself has not fixed has nothing to install; it waits for the daily pass, not the pager.
   const unpatchableDistro = f.where.startsWith('os ') && !f.fixed.length;
-  const flagged = f.kind === 'eol' || f.kev || (f.score != null && f.score >= THRESHOLD && !unpatchableDistro);
+  const flagged = f.kind === 'eol' || f.kind === 'exposure' || f.kev || (f.score != null && f.score >= THRESHOLD && !unpatchableDistro);
   const old = findings[key];
   findings[key] = { ...old, ...f, flagged, first_seen: old?.first_seen ?? now, last_seen: now, status: 'open', resolved_at: undefined };
   if (old?.status === 'resolved') findings[key].reopened = now;
@@ -183,12 +213,46 @@ for (const { h, inv, err } of inventories) {
         // OSV ignores RPM module streams: a perl:5.32 advisory matches perl 5.26 packages. Different modularity = different stream.
         const modular = (ver) => /\.module[_+]/.test(ver);
         if (fixed.length && fixed.every((f) => modular(f) !== modular(where[i].version))) continue;
-        record({ host: h.name, kind: 'vuln', ...where[i], vuln: id, cves: j.cves, score: j.score, kev: j.kev, summary: (v.summary ?? v.details ?? '').slice(0, 200), fixed });
+        // OSV unions every stream's range, so a build of the exact fixed version can still match an older build's range.
+        if (fixed.includes(where[i].version)) continue;
+        let summary = (v.summary ?? v.details ?? '').slice(0, 200);
+        let fixedHere = fixed;
+        // ALSA summaries name the module stream ("php:7.2 security update"). A fix shipped in a stream this host doesn't run
+        // installs nothing here: the CVE is unfixed for this host and belongs with the daily pass, not the pager.
+        const stream = modular(where[i].version) && inv.module_streams && /^\w+:\s*([\w.-]+:[\w.-]+)\s/.exec(v.summary ?? '')?.[1];
+        if (stream && !inv.module_streams.includes(stream)) {
+          summary = `[fix only in ${stream}; host runs ${inv.module_streams.filter((m) => m.startsWith(stream.split(':')[0] + ':')).join(', ') || 'no such stream'}] ${summary}`.slice(0, 240);
+          fixedHere = [];
+        }
+        let debian;
+        const codename = where[i].ecosystem.startsWith('Debian:') && DEBIAN_CODENAMES[where[i].ecosystem.split(':')[1]];
+        if (codename && !fixedHere.length) {
+          const t = j.cves.map((c) => DEBIAN_TRACKER[where[i].pkg]?.[c]?.[codename]).find(Boolean);
+          if (t) {
+            const [status, urgency, nodsa, fixedVer] = t;
+            debian = { status, urgency, nodsa };
+            // Debian fixed it but OSV hasn't caught up: that is an installable fix, so let it page like one.
+            if (status === 'resolved' && fixedVer && fixedVer !== '0' && dpkgLess(where[i].version, fixedVer)) fixedHere = [fixedVer];
+          }
+        }
+        record({ host: h.name, kind: 'vuln', ...where[i], vuln: id, cves: j.cves, score: j.score, kev: j.kev, summary, fixed: fixedHere, debian });
       }
     });
 
     // Node runtimes not owned by a distro package (nvm, nodesource): Node's own security feed + EOL.
     for (const n of inv.node ?? []) {
+      if (n.runtime === 'bun') {
+        for (const a of BUN_VULNS) {
+          if (a.state && a.state !== 'published') continue;
+          const ranges = (a.vulnerabilities ?? []).filter((v) => v.package?.name === 'bun');
+          if (!ranges.some((v) => semver.satisfies(n.version, v.vulnerable_version_range.replace(/,/g, ' ')))) continue;
+          const cves = a.cve_id ? [a.cve_id] : [];
+          const score = a.cvss_severities?.cvss_v3?.vector_string ? cvss3(a.cvss_severities.cvss_v3.vector_string) : LABEL[String(a.severity).toUpperCase()] ?? null;
+          record({ host: h.name, kind: 'vuln', where: `runtime ${n.path}`, pkg: 'bun', version: n.version, vuln: a.ghsa_id, cves, score, kev: cves.some((c) => KEV.has(c)), summary: `${a.summary} (used by: ${n.used_by.join(', ') || 'nothing in pm2'})`.slice(0, 240), fixed: ranges.map((v) => v.patched_versions).filter(Boolean) });
+        }
+        cov.scanned.push(`bun ${n.version} at ${n.path} via oven-sh/bun GitHub advisories`);
+        continue;
+      }
       if (n.runtime !== 'node') { cov.not_scanned.push(`${n.runtime} ${n.version} at ${n.path} (used by ${n.used_by.join(', ') || 'nothing in pm2'}): no vulnerability feed wired`); continue; }
       const major = `v${semver.major(n.version)}`;
       const sched = NODE_SCHEDULE[major];
@@ -220,6 +284,15 @@ for (const { h, inv, err } of inventories) {
       cov.scanned.push(`WordPress ${site.url}: core ${site.core}, ${site.plugins.length} plugins, ${site.themes.length} themes`);
     }
     for (const [name, image] of inv.containers ?? []) cov.not_scanned.push(`container ${name} (${image}): image contents not scanned`);
+    for (const [comm, files] of inv.stale ?? []) cov.not_scanned.push(`stale process ${comm} still runs replaced code (${files.join(', ')}): patched on disk, not in effect until restarted`);
+
+    const probes = (inv.public_addrs ?? []).flatMap((addr) => (inv.listeners ?? []).map(([port, proc]) => ({ addr, port, proc })));
+    const open = (await pool(probes, 16, async (p) => ((await reachable(p.addr, p.port)) ? p : null))).filter(Boolean);
+    for (const p of open) {
+      if (h.public_ports.includes(p.port)) continue;
+      record({ host: h.name, kind: 'exposure', where: `port ${p.addr} ${p.port}`, pkg: p.proc, version: '', vuln: `EXPOSED-${p.port}`, cves: [], score: null, kev: false, summary: `${p.proc} on :${p.port} is reachable from the internet at ${p.addr}; hosts.json does not list it as public`, fixed: [] });
+    }
+    cov.scanned.push(`${probes.length} external port probes (${open.length} open: ${[...new Set(open.map((p) => p.port))].join(', ')})`);
     scannedHosts.add(h.name);
   } catch (e) {
     errors.push(`${h.name} matching: ${e.stack ?? e.message}`);
