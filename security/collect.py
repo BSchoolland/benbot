@@ -54,6 +54,14 @@ def debian_pkgs():
             foreign.append("%s %s (%s)" % (pkg, sver, suite))
             continue
         src[spkg] = sver
+    # Debian files kernel advisories under source "linux", but signed images (all -cloud/-amd64 kernels) come from
+    # "linux-signed-amd64"; without this a host with no linux-headers/libc-dev has its kernel never matched. The
+    # running image's own version is what matters, not whichever kernel package happens to be newest.
+    running = "linux-image-%s" % sh("uname -r").strip()
+    kver = sh("dpkg-query -W -f '${Version}' %s" % running).strip()
+    if not kver:
+        raise RuntimeError("running kernel %s has no installed package version" % running)
+    src["linux"] = kver
     inv["os_pkgs"] = {"ecosystem": "Debian:" + inv["os"]["version_id"].split(".")[0],
                       "pkgs": sorted(src.items()), "foreign": foreign}
 
@@ -63,6 +71,15 @@ def rpm_pkgs():
     for line in sh("rpm -qa --qf '%{NAME}\\t%{EPOCH}\\t%{VERSION}-%{RELEASE}\\n'").splitlines():
         name, epoch, vr = line.split("\t")
         pkgs[name] = vr if epoch in ("(none)", "0") else "%s:%s" % (epoch, vr)
+    # Several kernels are installed side by side; match the one that is running.
+    running = sh("uname -r").strip()
+    kvr = sh("rpm -q --qf '%%{EPOCH}\\t%%{VERSION}-%%{RELEASE}' kernel-core-%s || rpm -q --qf '%%{EPOCH}\\t%%{VERSION}-%%{RELEASE}' kernel-%s" % (running, running)).strip()
+    if kvr.count("\t") != 1:
+        raise RuntimeError("running kernel %s: unexpected rpm answer %r" % (running, kvr[:120]))
+    epoch, vr = kvr.split("\t")
+    for k in ("kernel", "kernel-core"):
+        if k in pkgs:
+            pkgs[k] = vr if epoch in ("(none)", "0") else "%s:%s" % (epoch, vr)
     major = inv["os"]["version_id"].split(".")[0]
     eco = {"almalinux": "AlmaLinux", "rocky": "Rocky Linux"}.get(inv["os"]["id"], inv["os"]["id"])
     inv["os_pkgs"] = {"ecosystem": "%s:%s" % (eco, major), "pkgs": sorted(pkgs.items()), "foreign": []}
@@ -87,12 +104,10 @@ def pm2_daemons():
         if node.endswith(" (deleted)"):
             node = node[:-len(" (deleted)")]
         script = None
-        try:
-            unit = sh("systemctl cat pm2-%s 2>/dev/null" % user)
-            u = re.search(r"^ExecStart=(\S*pm2)\s", unit, re.M)
+        # pm2-<user>.service (from `pm2 startup`) names the CLI the daemon was launched with; not every daemon has one.
+        if sh("systemctl list-unit-files --no-legend pm2-%s.service || true" % user).strip():
+            u = re.search(r"^ExecStart=(\S*pm2)\s", sh("systemctl cat pm2-%s" % user), re.M)
             script = u and u.group(1)
-        except Exception:
-            pass
         script = script or shutil.which("pm2")
         if not script:
             raise RuntimeError("pm2 daemon for %s at %s but no pm2 CLI found" % (user, home))
@@ -148,16 +163,13 @@ def pm2_apps():
         for p in json.loads(out[start:]):
             env = p.get("pm2_env", {})
             # The live process's binary is the truth: pm2 reports "none" for bun shebang scripts and a bare "node" whose PATH differs per user.
-            interp = env.get("exec_interpreter")
-            if p.get("pid"):
-                try:
-                    interp = os.readlink("/proc/%s/exe" % p["pid"]).replace(" (deleted)", "")
-                except OSError:
-                    pass  # exited between jlist and here; keep pm2's own value
+            interp, source = env.get("exec_interpreter"), "pm2"
+            if p.get("pid") and os.path.exists("/proc/%s/exe" % p["pid"]):
+                interp, source = os.readlink("/proc/%s/exe" % p["pid"]).replace(" (deleted)", ""), "process"
             elif interp == "node":
-                interp = node
+                interp, source = node, "daemon node"
             apps.append({"name": p.get("name"), "user": user, "cwd": env.get("pm_cwd"),
-                         "interpreter": interp, "status": env.get("status")})
+                         "interpreter": interp, "interpreter_source": source, "status": env.get("status")})
     inv["pm2"] = apps
 
 
@@ -185,20 +197,27 @@ def node_runtimes():
         owner = None
         try:
             owner = sh("dpkg -S %s 2>/dev/null || rpm -qf %s" % (b, b)).strip()
-        except Exception:
-            pass
+        except RuntimeError:
+            pass  # not owned by a distro package (nvm, tarball, bun): owner stays None
         out.append({"path": b, "runtime": "bun" if os.path.basename(b) == "bun" else "node", "version": ver, "package_owner": owner,
                     "used_by": [a["name"] for a in inv.get("pm2", []) if a.get("interpreter") == b]})
     inv["node"] = out
 
 
+BAD_PKG_JSON = []
+
+
 def read_pkg(d):
+    f = os.path.join(d, "package.json")
+    if not os.path.isfile(f):
+        return None, None  # .bin, scope dirs, stray folders: not packages
     try:
-        with open(os.path.join(d, "package.json")) as f:
-            j = json.load(f)
-        return j.get("name"), j.get("version")
-    except Exception:
+        with open(f) as fh:
+            j = json.load(fh)
+    except (OSError, ValueError) as e:
+        BAD_PKG_JSON.append("%s (%s)" % (f, e))
         return None, None
+    return j.get("name"), j.get("version")
 
 
 def walk_node_modules(nm, found, depth=0):
@@ -259,26 +278,28 @@ def wordpress():
 
 
 def containers():
-    try:
-        out = sh("docker ps --format '{{.Names}}\\t{{.Image}}' 2>/dev/null")
-    except Exception:
+    if not shutil.which("docker"):
         inv["containers"] = []
         return
+    out = sh("docker ps --format '{{.Names}}\\t{{.Image}}'")
     inv["containers"] = [l.split("\t") for l in out.splitlines() if l]
 
 
-step("os", os_info)
-if os.path.exists("/usr/bin/dpkg-query"):
-    step("debian packages", debian_pkgs)
-elif os.path.exists("/usr/bin/rpm"):
-    step("rpm packages", rpm_pkgs)
-else:
-    inv["errors"].append("os packages: no dpkg or rpm")
-step("pm2", pm2_apps)
-step("node", node_runtimes)
-step("npm", npm_apps)
-step("wordpress", wordpress)
-step("containers", containers)
-step("stale processes", stale_processes)
-step("listeners", listeners)
-print(json.dumps(inv))
+if __name__ == "__main__":
+    step("os", os_info)
+    if os.path.exists("/usr/bin/dpkg-query"):
+        step("debian packages", debian_pkgs)
+    elif os.path.exists("/usr/bin/rpm"):
+        step("rpm packages", rpm_pkgs)
+    else:
+        inv["errors"].append("os packages: no dpkg or rpm")
+    step("pm2", pm2_apps)
+    step("node", node_runtimes)
+    step("npm", npm_apps)
+    if BAD_PKG_JSON:
+        inv["errors"].append("npm: %d unreadable package.json, those packages are unscanned: %s" % (len(BAD_PKG_JSON), "; ".join(BAD_PKG_JSON[:5])))
+    step("wordpress", wordpress)
+    step("containers", containers)
+    step("stale processes", stale_processes)
+    step("listeners", listeners)
+    print(json.dumps(inv))

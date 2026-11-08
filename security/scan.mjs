@@ -9,6 +9,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import net from 'node:net';
 import semver from 'semver';
 import { cvss3 } from './cvss.mjs';
+import { osvDecision, wpScore, wpDescription, bunAffected, collectorHealth } from './match.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const ROOT = path.resolve(HERE, '..');
@@ -16,6 +17,8 @@ const STATE = path.join(ROOT, 'state/security');
 const CACHE = path.join(STATE, 'cache');
 const THRESHOLD = 9.0;
 const BLIND_AFTER = 3;
+// --dry-run: collect and match, print what would page, write nothing and wake nobody.
+const DRY_RUN = process.argv.includes('--dry-run');
 for (const d of ['inventory', 'cache/osv', 'pending']) fs.mkdirSync(path.join(STATE, d), { recursive: true });
 
 const readJson = (f, dflt) => (fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : dflt);
@@ -185,9 +188,10 @@ for (const { h, inv, err } of inventories) {
   const hk = `host:${h.name}`;
   if (err) { errors.push(err.message); health[hk] = { fails: (health[hk]?.fails ?? 0) + 1, last_error: err.message, since: health[hk]?.since ?? now }; continue; }
   health[hk] = { fails: 0 };
-  writeJson(path.join(STATE, 'inventory', `${h.name}.json`), { at: now, ...inv });
+  if (!DRY_RUN) writeJson(path.join(STATE, 'inventory', `${h.name}.json`), { at: now, ...inv });
   const cov = (coverage.hosts[h.name] = { scanned: [], not_scanned: [], collector_errors: inv.errors });
   for (const e of inv.errors) errors.push(`${h.name} collector: ${e}`);
+  collectorHealth(health, h.name, inv.errors, now);
 
   try {
     // OS packages + npm through OSV
@@ -210,32 +214,11 @@ for (const { h, inv, err } of inventories) {
       for (const id of ids) {
         const v = details[id], j = judged[id];
         const fixed = fixedFor(v, where[i].pkg, where[i].ecosystem);
-        // OSV ignores RPM module streams: a perl:5.32 advisory matches perl 5.26 packages. Different modularity = different stream.
-        const modular = (ver) => /\.module[_+]/.test(ver);
-        if (fixed.length && fixed.every((f) => modular(f) !== modular(where[i].version))) continue;
-        // OSV unions every stream's range, so a build of the exact fixed version can still match an older build's range.
-        if (fixed.includes(where[i].version)) continue;
-        let summary = (v.summary ?? v.details ?? '').slice(0, 200);
-        let fixedHere = fixed;
-        // ALSA summaries name the module stream ("php:7.2 security update"). A fix shipped in a stream this host doesn't run
-        // installs nothing here: the CVE is unfixed for this host and belongs with the daily pass, not the pager.
-        const stream = modular(where[i].version) && inv.module_streams && /^\w+:\s*([\w.-]+:[\w.-]+)\s/.exec(v.summary ?? '')?.[1];
-        if (stream && !inv.module_streams.includes(stream)) {
-          summary = `[fix only in ${stream}; host runs ${inv.module_streams.filter((m) => m.startsWith(stream.split(':')[0] + ':')).join(', ') || 'no such stream'}] ${summary}`.slice(0, 240);
-          fixedHere = [];
-        }
-        let debian;
         const codename = where[i].ecosystem.startsWith('Debian:') && DEBIAN_CODENAMES[where[i].ecosystem.split(':')[1]];
-        if (codename && !fixedHere.length) {
-          const t = j.cves.map((c) => DEBIAN_TRACKER[where[i].pkg]?.[c]?.[codename]).find(Boolean);
-          if (t) {
-            const [status, urgency, nodsa, fixedVer] = t;
-            debian = { status, urgency, nodsa };
-            // Debian fixed it but OSV hasn't caught up: that is an installable fix, so let it page like one.
-            if (status === 'resolved' && fixedVer && fixedVer !== '0' && dpkgLess(where[i].version, fixedVer)) fixedHere = [fixedVer];
-          }
-        }
-        record({ host: h.name, kind: 'vuln', ...where[i], vuln: id, cves: j.cves, score: j.score, kev: j.kev, summary, fixed: fixedHere, debian });
+        const debianEntry = codename ? j.cves.map((c) => DEBIAN_TRACKER[where[i].pkg]?.[c]?.[codename]).find(Boolean) : undefined;
+        const d = osvDecision({ installed: where[i].version, ecosystem: where[i].ecosystem, osv: v, fixed, moduleStreams: inv.module_streams, debianEntry, dpkgLess });
+        if (!d) continue;
+        record({ host: h.name, kind: 'vuln', ...where[i], vuln: id, cves: j.cves, score: j.score, kev: j.kev, summary: d.summary, fixed: d.fixed, debian: d.debian });
       }
     });
 
@@ -245,7 +228,7 @@ for (const { h, inv, err } of inventories) {
         for (const a of BUN_VULNS) {
           if (a.state && a.state !== 'published') continue;
           const ranges = (a.vulnerabilities ?? []).filter((v) => v.package?.name === 'bun');
-          if (!ranges.some((v) => semver.satisfies(n.version, v.vulnerable_version_range.replace(/,/g, ' ')))) continue;
+          if (!ranges.some((v) => bunAffected(n.version, v.vulnerable_version_range))) continue;
           const cves = a.cve_id ? [a.cve_id] : [];
           const score = a.cvss_severities?.cvss_v3?.vector_string ? cvss3(a.cvss_severities.cvss_v3.vector_string) : LABEL[String(a.severity).toUpperCase()] ?? null;
           record({ host: h.name, kind: 'vuln', where: `runtime ${n.path}`, pkg: 'bun', version: n.version, vuln: a.ghsa_id, cves, score, kev: cves.some((c) => KEV.has(c)), summary: `${a.summary} (used by: ${n.used_by.join(', ') || 'nothing in pm2'})`.slice(0, 240), fixed: ranges.map((v) => v.patched_versions).filter(Boolean) });
@@ -271,14 +254,16 @@ for (const { h, inv, err } of inventories) {
     // WordPress core, plugins, themes
     for (const site of inv.wordpress ?? []) {
       if (!site.core) { cov.not_scanned.push(`WordPress at ${site.path}: wp-cli could not read it`); continue; }
-      const items = [['core', site.core, site.core], ...site.plugins.map(([s, v]) => ['plugin', s, v]), ...site.themes.map(([s, v]) => ['theme', s, v])];
-      await pool(items, 6, async ([kind, slug, ver]) => {
+      const items = [['core', site.core, site.core, 'active'], ...site.plugins.map(([s, v, st]) => ['plugin', s, v, st]), ...site.themes.map(([s, v, st]) => ['theme', s, v, st])];
+      await pool(items, 6, async ([kind, slug, ver, status]) => {
         const feed = await wpFeed(kind, slug);
         for (const v of feed.data?.vulnerability ?? []) {
           if (kind !== 'core' && !wpAffected(ver, v.operator ?? {})) continue;
           const cves = (v.source ?? []).map((s) => s.id).filter((x) => /^CVE-/.test(x));
-          const score = v.impact?.cvss?.score != null ? Number(v.impact.cvss.score) : null;
-          record({ host: h.name, kind: 'vuln', where: `wordpress ${site.url} ${kind}`, pkg: kind === 'core' ? 'wordpress' : slug, version: ver, vuln: cves[0] ?? v.uuid, cves, score, kev: !!v.impact?.ssvc?.kev || cves.some((c) => KEV.has(c)), summary: (v.name ?? '').slice(0, 200), fixed: v.operator?.max_operator === 'lt' ? [v.operator.max_version] : [] });
+          // An estimated score only counts where the code runs; inactive plugins keep the feed's own score.
+          let { score, estimated } = wpScore(v);
+          if (estimated && !['active', 'must-use', 'active-network', 'parent'].includes(status)) ({ score, estimated } = { score: null, estimated: false });
+          record({ host: h.name, kind: 'vuln', where: `wordpress ${site.url} ${kind}`, pkg: kind === 'core' ? 'wordpress' : slug, version: ver, vuln: cves[0] ?? v.uuid, cves, score, score_estimated: estimated || undefined, kev: !!v.impact?.ssvc?.kev || cves.some((c) => KEV.has(c)), summary: `[${status}] ${wpDescription(v)}`.slice(0, 240), fixed: v.operator?.max_operator === 'lt' ? [v.operator.max_version] : [] });
         }
       });
       cov.scanned.push(`WordPress ${site.url}: core ${site.core}, ${site.plugins.length} plugins, ${site.themes.length} themes`);
@@ -309,6 +294,10 @@ for (const [k, f] of Object.entries(findings)) {
 
 const fresh = Object.values(findings).filter((f) => f.status === 'open' && f.flagged && (!f.alerted_at || f.reopened === now));
 const blind = Object.entries(health).filter(([, v]) => v.fails >= BLIND_AFTER && !v.alerted).map(([k, v]) => ({ check: k, ...v }));
+if (DRY_RUN) {
+  console.log(JSON.stringify({ would_page: fresh.map((f) => ({ host: f.host, where: f.where, pkg: f.pkg, version: f.version, vuln: f.vuln, score: f.score, score_estimated: f.score_estimated, kev: f.kev, fixed: f.fixed, summary: f.summary })), blind, errors }, null, 1));
+  process.exit(errors.length ? 1 : 0);
+}
 const BASELINE = process.argv.includes('--baseline');
 if ((fresh.length || blind.length) && !BASELINE) {
   const file = path.join(STATE, 'pending', `${now.replace(/[:.]/g, '-')}.json`);
