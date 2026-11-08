@@ -224,6 +224,9 @@ def walk_node_modules(nm, found, depth=0):
     if depth > 12 or not os.path.isdir(nm):
         return
     for e in os.listdir(nm):
+        if e in (".bun", ".pnpm"):
+            walk_isolated_store(os.path.join(nm, e), found)
+            continue
         if e.startswith("."):
             continue
         p = os.path.join(nm, e)
@@ -233,6 +236,25 @@ def walk_node_modules(nm, found, depth=0):
             if name and ver:
                 found.add((name, ver))
             walk_node_modules(os.path.join(d, "node_modules"), found, depth + 1)
+
+
+def walk_isolated_store(store, found):
+    """Bun's isolated linker and pnpm keep every package at <store>/<name@ver>/node_modules/<name>; the top-level
+    node_modules holds only symlinks into it. Dependencies inside each entry are symlinks to sibling entries, so
+    read only real directories and never recurse through links (they cycle)."""
+    for entry in os.listdir(store):
+        nm = os.path.join(store, entry, "node_modules")
+        if not os.path.isdir(nm):
+            continue
+        for e in os.listdir(nm):
+            p = os.path.join(nm, e)
+            subs = [os.path.join(p, s) for s in os.listdir(p)] if e.startswith("@") and os.path.isdir(p) and not os.path.islink(p) else [p]
+            for d in subs:
+                if os.path.islink(d) or not os.path.isdir(d):
+                    continue
+                name, ver = read_pkg(d)
+                if name and ver:
+                    found.add((name, ver))
 
 
 def npm_apps():

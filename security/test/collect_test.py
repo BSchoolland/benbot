@@ -85,6 +85,20 @@ check("good package found", ("good", "1.0.0") in found, str(found))
 check("malformed package.json recorded", len(m.BAD_PKG_JSON) == 1 and "bad/package.json" in m.BAD_PKG_JSON[0], str(m.BAD_PKG_JSON))
 os.environ["PATH"] = orig_path
 
+# 5b. Bun's isolated store (node_modules/.bun) is read, including scoped packages, without following dependency links.
+d = tempfile.mkdtemp()
+store = os.path.join(d, "node_modules", ".bun")
+for entry, pkg, ver in [("express@5.2.1", "express", "5.2.1"), ("@types+node@24.0.0", "@types/node", "24.0.0")]:
+    os.makedirs(os.path.join(store, entry, "node_modules", pkg))
+    json.dump({"name": pkg, "version": ver}, open(os.path.join(store, entry, "node_modules", pkg, "package.json"), "w"))
+os.symlink(os.path.join(store, "@types+node@24.0.0", "node_modules", "@types"), os.path.join(store, "express@5.2.1", "node_modules", "@types"))
+os.symlink(os.path.join(store, "express@5.2.1", "node_modules", "express"), os.path.join(store, "express@5.2.1", "node_modules", "self-cycle"))
+m = load(fakebin({}))
+found = set()
+m.walk_node_modules(os.path.join(d, "node_modules"), found)
+check("bun isolated store packages found", found == {("express", "5.2.1"), ("@types/node", "24.0.0")}, str(found))
+os.environ["PATH"] = orig_path
+
 # 6. Debian kernel: the running signed image maps to source "linux"; an unresolvable running kernel is an error.
 dq = """case "$*" in
   *source:Package*) printf 'linux-image-6.1.0-54-cloud-amd64\\tlinux-signed-amd64\\t6.1.190+1\\tinstalled\\nbash\\tbash\\t5.2.15-2+b7\\tinstalled\\n' ;;
