@@ -71,3 +71,17 @@ export function collectorHealth(health, host, collectorErrors, now) {
     health[key] = { fails: (old?.fails ?? 0) + 1, last_error: msg.slice(0, 300), since: old?.since ?? now, alerted: old?.alerted };
   }
 }
+
+// Third-party apt packages (vendor repos) that OSV knows under their upstream ecosystem. The collector reports them as
+// "<pkg> <version> (<suite>)". Returns an OSV query target, or null when we have no mapping (stays "not scanned").
+const FOREIGN = {
+  caddy: { ecosystem: 'Go', name: 'github.com/caddyserver/caddy/v2' },
+};
+export function foreignToOsv(entry) {
+  const m = /^(\S+) (\S+) \(/.exec(entry);
+  if (!m) throw new Error(`unparseable third-party package entry: ${entry}`);
+  const target = FOREIGN[m[1]];
+  if (!target) return null;
+  // Vendor debs carry the upstream version, sometimes with a Debian revision ("2.11.4-1"); OSV wants the upstream one.
+  return { ...target, pkg: m[1], version: m[2].replace(/^\d+:/, '').replace(/-[^-]+$/, '') };
+}

@@ -9,7 +9,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import net from 'node:net';
 import semver from 'semver';
 import { cvss3 } from './cvss.mjs';
-import { osvDecision, wpScore, wpDescription, bunAffected, collectorHealth } from './match.mjs';
+import { osvDecision, wpScore, wpDescription, bunAffected, collectorHealth, foreignToOsv } from './match.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const ROOT = path.resolve(HERE, '..');
@@ -199,7 +199,13 @@ for (const { h, inv, err } of inventories) {
     if (inv.os_pkgs) {
       for (const [name, version] of inv.os_pkgs.pkgs) { queries.push({ package: { name, ecosystem: inv.os_pkgs.ecosystem }, version }); where.push({ where: `os ${inv.os_pkgs.ecosystem}`, ecosystem: inv.os_pkgs.ecosystem, pkg: name, version }); }
       cov.scanned.push(`${inv.os_pkgs.pkgs.length} ${inv.os_pkgs.ecosystem} packages`);
-      for (const f of inv.os_pkgs.foreign) cov.not_scanned.push(`third-party apt package ${f} (only covered if it is a runtime handled below)`);
+      for (const f of inv.os_pkgs.foreign) {
+        const t = foreignToOsv(f);
+        if (!t) { cov.not_scanned.push(`third-party apt package ${f} (only covered if it is a runtime handled below)`); continue; }
+        queries.push({ package: { name: t.name, ecosystem: t.ecosystem }, version: t.version });
+        where.push({ where: `apt-thirdparty ${t.pkg}`, ecosystem: t.ecosystem, pkg: t.name, version: t.version });
+        cov.scanned.push(`third-party apt ${t.pkg} ${t.version} via OSV ${t.ecosystem}`);
+      }
     }
     for (const app of inv.npm ?? []) {
       for (const [name, version] of app.pkgs) { queries.push({ package: { name, ecosystem: 'npm' }, version }); where.push({ where: `npm ${app.app} (${app.dir})`, ecosystem: 'npm', pkg: name, version }); }

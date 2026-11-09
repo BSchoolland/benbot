@@ -94,3 +94,13 @@ test('collector step failures count up per step and go blind at 3; recovery rese
   collectorHealth(h, 'other', [], 't4');
   assert.equal(h['collect:ps:rpm packages'].fails, 4, 'another host never resets this one');
 });
+
+import { foreignToOsv } from '../match.mjs';
+test('third-party apt: caddy maps to its Go module with the upstream version', () => {
+  assert.deepEqual(foreignToOsv('caddy 2.11.4 (any-version)'), { ecosystem: 'Go', name: 'github.com/caddyserver/caddy/v2', pkg: 'caddy', version: '2.11.4' });
+  assert.equal(foreignToOsv('caddy 2.11.9-1 (any-version)').version, '2.11.9');
+});
+test('third-party apt: unmapped package stays unscanned; garbage throws', () => {
+  assert.equal(foreignToOsv('nodejs 22.23.4-1nodesource1 (nodistro)'), null);
+  assert.throws(() => foreignToOsv('weird'), /unparseable/);
+});
