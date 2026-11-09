@@ -36,4 +36,38 @@ W() { printf 'Warning: x\nplugin_name\tfile\tmessage\nhello\thello.php\tChecksum
 out=$(check "t pc" plugin_checksums)
 expect "plugin_checksums: mismatches are a finding, rc=0" "=== t pc rc=0" "$(grep '^===' <<<"$out")"
 expect "plugin_checksums: mismatch line shown" "hello	hello.php	Checksum does not match" "$out"
+
+# --- multi-command checks: early failure then successful final command, mid-loop, substitutions
+rc_of() { check t "$@" | sed -n 's/^=== t rc=//p'; }
+expect_fail() { local got; got=$(rc_of "${@:2}"); if [ -n "$got" ] && [ "$got" != 0 ]; then echo "ok   $1 (rc=$got)"; else echo "FAIL $1: rc=$got"; fail=1; fi; }
+expect_ok() { local got; got=$(rc_of "${@:2}"); if [ "$got" = 0 ]; then echo "ok   $1"; else echo "FAIL $1: rc=$got"; check t "${@:2}" | sed 's/^/     /'; fail=1; fi; }
+W() { case "$*" in "user list"*) return 1 ;; "option get"*) echo x ;; "db query"*) echo row ;; esac; }
+expect_fail "counts: user count fails, later option/DB calls succeed" counts
+W() { case "$*" in "user list"*) echo 3 ;; "option get admin_email"*) return 1 ;; "option get"*) echo 0 ;; "db query"*) echo row ;; esac; }
+expect_fail "counts: middle option fails" counts
+W() { case "$*" in "user list"*) echo 3 ;; "option get"*) echo 0 ;; "db query"*) echo row ;; esac; }
+expect_ok "counts: healthy" counts
+W() { case "$*" in "db query"*) echo "4 9" ;; *"list 4 "*) echo "uuid,name" ;; *"list 9 "*) return 1 ;; esac; }
+expect_fail "app_passwords: second user's list fails (mid-loop)" app_passwords
+Q() { case "$1" in "SHOW TABLES"*) return 1 ;; *) echo row ;; esac; }
+expect_fail "secrets_locations: options/posts fine, snippets-table probe errors" secrets_locations
+Q() { W db query "$1" --skip-column-names; }
+fail2ban-client() { case "$*" in status) printf '|- Number of jail:\t2\n`- Jail list:\tsshd, recidive\n' ;; "status sshd") printf '|- Currently banned:\t0\n|- Total banned:\t1\n' ;; *) return 255 ;; esac; }
+expect_fail "fail2ban: second jail's status fails (mid-loop)" fail2ban
+fail2ban-client() { case "$*" in status) printf '`- Jail list:\tsshd\n' ;; *) printf '|- Currently banned:\t0\n|- Total banned:\t1\n' ;; esac; }
+expect_ok "fail2ban: healthy" fail2ban
+fail2ban-client() { return 255; }
+expect_fail "fail2ban: server down" fail2ban
+unset -f fail2ban-client
+HOST=example.invalid
+curl() { case "$*" in *POST*) return 7 ;; *) echo 200 ;; esac; }
+expect_fail "batch_endpoint: first curl fails, second fine" batch_endpoint
+unset -f curl
+date() { case "$*" in *-d*) return 1 ;; *) command date "$@" ;; esac; }
+expect_fail "content: --since date fails in a substitution" content
+expect_fail "php_changed: --since date fails in a substitution" php_changed
+expect_fail "reporter: --since date fails in a substitution" reporter
+unset -f date
+W() { printf 'hello\thello.php\tChecksum does not match\nError: Only verified 18 of 23 plugins (3 failed, 2 skipped).\n'; return 1; }
+expect_ok "plugin_checksums: mismatch exit 1 is not a check failure under errexit" plugin_checksums
 exit $fail
