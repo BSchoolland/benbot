@@ -7,11 +7,6 @@
 # last_ip only. Snippets: id, name, active, modified (no code). Options and posts: names, ids and lengths only. Secret
 # patterns: location and count only.
 export LC_ALL=C
-SINCE=${1:?since}
-shift
-SITES="$*"
-[ -n "$SITES" ] || { echo "usage: wp-forensics.sh <since> <name>:<docroot>..." >&2; exit 2; }
-echo "# taken $(date -u +%Y-%m-%dT%H:%M:%SZ) since: $SINCE"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 check() {
   local name=$1 rc; shift
@@ -111,6 +106,11 @@ reporter() {
 }
 # Sourced by the tests with WPF_LIB=1: definitions only.
 if [ -n "${WPF_LIB:-}" ]; then return 0; fi
+SINCE=${1:?since}
+shift
+SITES="$*"
+[ -n "$SITES" ] || { echo "usage: wp-forensics.sh <since> <name>:<docroot>..." >&2; exit 2; }
+echo "# taken $(date -u +%Y-%m-%dT%H:%M:%SZ) since: $SINCE"
 
 for s in $SITES; do
   SITE=${s%%:*}; P=${s#*:}
