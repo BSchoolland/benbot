@@ -133,7 +133,7 @@ vhost_dirs() { local d; for d in /etc/nginx/sites-enabled /etc/nginx/conf.d /etc
 vhost_names() {
   # nginx/Apache directives, or Caddyfile site-address lines ("example.com, www.example.com {").
   case "$1" in
-    *Caddyfile*) g -hoE '^[A-Za-z0-9*:.-][^{(#]*\{' "$1" | tr -d '{,' ;;
+    *Caddyfile*|*.caddy) g -hoE '^[A-Za-z0-9*:.-][^{(#]*\{' "$1" | tr -d '{,' ;;
     *) g -hoiE '^\s*(server_name|ServerName|ServerAlias)\s+[^;#]+' "$1" | awk '{$1=""; print}' ;;
   esac
 }

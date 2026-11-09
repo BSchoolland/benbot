@@ -59,6 +59,13 @@ expect_rc "vhosts: find fails on the first config dir, second fine" fail vhosts
 reset; vhost_dirs() { true; }
 out=$(check t vhosts); expect_line "vhosts: no config dirs is stated, not empty" "(no web server config dirs)" "$out"
 
+# --- vhost_names: Caddy site files (*.caddy and Caddyfile), nginx
+d=$(mktemp -d); printf 'example.com, www.example.com {\n  reverse_proxy 127.0.0.1:3000 {\n  }\n}\n' >"$d/site.caddy"
+printf 'server {\n  server_name a.example b.example;\n}\n' >"$d/nginx.conf"
+expect_line "vhost_names: .caddy site addresses" "example.com www.example.com " "$(vhost_names "$d/site.caddy" | tr -s ' \n' ' ')"
+expect_line "vhost_names: nginx server_name" "a.example b.example " "$(vhost_names "$d/nginx.conf" | tr -s ' \n' ' ' | sed 's/^ //')"
+rm -rf "$d"
+
 # --- auth: early journalctl failure, later ones fine
 reset; journalctl() { case "$*" in *sshd*) return 1 ;; *) return 0 ;; esac; }
 expect_rc "auth: sshd journal fails, sudo/all journals succeed" fail auth
