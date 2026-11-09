@@ -5,7 +5,7 @@ an interactive login and are dead in the bot-spawned sessions you usually run in
 ## The credential
 
 `~/.budget/google-oauth.env` — client id/secret + refresh token for the "Schoolland Receipts"
-OAuth client (GCP project 759968794110), authorized as bschoolland@gmail.com.
+OAuth client in Ben's GCP project, authorized as Ben's Google account (both in `local/config/owner.json`).
 
 Scopes: `drive`, `cloud-platform`, `calendar`, `gmail.modify`, `gmail.settings.basic`.
 Check what's live rather than trusting this list: `python3 services/google/auth.py`

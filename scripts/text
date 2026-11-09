@@ -6,6 +6,7 @@
 // sms shows the raw texts.
 import fs from 'node:fs';
 import { q } from '../core/db.mjs';
+import { readConfig } from '../core/paths.mjs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 const [num, ...rest] = process.argv.slice(2);
@@ -22,7 +23,7 @@ if (!marker) { console.error('text: settings.texts_out_marker not set'); process
 const thread = process.env.BENBOT_THREAD || 'unknown';
 q.setTextPending.run(digits, thread, Date.now());
 const line = `${marker}+1${digits}|${body}`;
-await gmailSend('bschoolland@gmail.com', 'Phone Trigger', line);
+await gmailSend(readConfig('owner.json').google_account, 'Phone Trigger', line);
 const id = execFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), 'discord-send'), [channel, line], { encoding: 'utf8' }).trim();
 console.log(`emailed the phone trigger; audit (msg ${id}); reply from +1${digits} will wake ${thread}`);
 

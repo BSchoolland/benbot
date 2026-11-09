@@ -43,6 +43,19 @@ cp benbot.service ~/.config/systemd/user/ && systemctl --user daemon-reload && s
 ```
 Bot needs the Message Content and Server Members intents and permission to create/manage threads and add reactions.
 
+## What's code and what's yours
+
+The repo is code. Anything personal or machine-specific (who the owner is, which hosts and sites to watch, credentials,
+client names) lives under `local/`, which is gitignored; code reads it through `core/paths.mjs` (`readConfig`), never by
+hard-coding a path, email or hostname. A missing file fails loud.
+
+```
+local/config/owner.json                  # {"google_account": "...", "gcp_project": "..."}
+local/config/security/hosts.json         # the hosts security/scan.mjs and intrusion-snapshot.sh watch
+local/config/security/wordpress-ir.md    # the daily WordPress forensic pass (which sites, standing decisions)
+```
+`.env`, `state/`, `TEAM/`, `jobs/` and `workspaces/` are private too and move under `local/` next.
+
 ## Ops
 ```sh
 journalctl --user -u benbot -f          # bot log

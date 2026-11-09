@@ -2,9 +2,10 @@
 """Print Ben's Claude subscription limit utilization: 5-hour session, weekly all-models,
 weekly Fable. Usage: usage-limits [--json]. Ben measures cost in these, never dollars."""
 import json, sys, urllib.request
+from pathlib import Path
 from datetime import datetime, timezone
 
-tok = json.load(open("/home/ben/.claude/.credentials.json"))["claudeAiOauth"]["accessToken"]
+tok = json.load(open(Path.home() / ".claude/.credentials.json"))["claudeAiOauth"]["accessToken"]
 req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage",
     headers={"Authorization": "Bearer " + tok, "anthropic-beta": "oauth-2025-04-20"})
 with urllib.request.urlopen(req, timeout=15) as r:

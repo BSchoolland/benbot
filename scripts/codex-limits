@@ -2,8 +2,9 @@
 """Print Ben's codex (ChatGPT) pool utilization: 5-hour window and weekly window.
 Usage: codex-limits [--json]. The gpt-* models bill this pool, not the Anthropic sub."""
 import json, sys, urllib.request
+from pathlib import Path
 
-auth = json.load(open("/home/ben/.codex/auth.json"))["tokens"]
+auth = json.load(open(Path.home() / ".codex/auth.json"))["tokens"]
 req = urllib.request.Request("https://chatgpt.com/backend-api/codex/usage",
     headers={"Authorization": "Bearer " + auth["access_token"],
              "chatgpt-account-id": auth["account_id"],

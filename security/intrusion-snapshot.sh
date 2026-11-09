@@ -17,7 +17,7 @@ stable() {
     s/^=== hidden dirs in tmp$/=== hidden entries in tmp dirs/' | grep -vx '=== end'
 }
 
-for host in $(jq -r '.[].ssh' "$ROOT/security/hosts.json"); do
+for host in $(jq -r '.[].ssh' "$ROOT/local/config/security/hosts.json"); do
   out=$DIR/$host-$DATE.txt
   prev=$(find "$DIR" -maxdepth 1 -regextype egrep -regex ".*/$host-[0-9]{4}-[0-9]{2}-[0-9]{2}\.txt" ! -name "$host-$DATE.txt" | sort | tail -1)
   # Review interval: from 10 minutes before the previous snapshot was written (overlap, never a gap).

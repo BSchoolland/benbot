@@ -1,5 +1,5 @@
 [Unit]
-Description=BenBot hourly vulnerability scan of V2V servers (no model; wakes security-triage on new CVSS>=9 or KEV findings)
+Description=BenBot hourly vulnerability scan of the hosts in local/config/security/hosts.json (no model; wakes security-triage on new CVSS>=9 or KEV findings)
 
 [Service]
 Type=oneshot

@@ -8,7 +8,7 @@ Usage: resource-hogs-sample [--write] [--baseline PATH] [--out PATH]
 import collections, datetime, json, os, subprocess, sys
 from pathlib import Path
 
-STATE = Path('/home/ben/Projects/benbot/state/resource-hogs')
+STATE = Path(__file__).resolve().parent.parent / 'state' / 'resource-hogs'
 TCK = os.sysconf('SC_CLK_TCK')
 NOW = datetime.datetime.now().astimezone()
 TODAY = NOW.date().isoformat()

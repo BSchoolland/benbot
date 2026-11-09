@@ -4,9 +4,10 @@
 Prints JSON with counts, target IDs and statuses only: never titles or URLs (they can carry tokens).
 """
 import json, os, sys, time, urllib.request
+from pathlib import Path
 
 CDP = 'http://127.0.0.1:9222'
-PROFILE = '--user-data-dir=/home/ben/.budget/chrome-live'
+PROFILE = f'--user-data-dir={Path.home()}/.budget/chrome-live'
 
 
 def cdp(path, method='GET'):

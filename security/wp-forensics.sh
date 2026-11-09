@@ -1,5 +1,5 @@
 #!/bin/bash
-# Daily WordPress forensic snapshot for the given sites (ssh HOST bash -s -- <since> < wp-forensics.sh).
+# Daily WordPress forensic snapshot of the given sites (ssh <host> bash -s -- '<since>' <name>:<docroot>... < wp-forensics.sh).
 # Same output contract as intrusion.sh: "=== <site> <check> rc=<n>", output, "!! " stderr, final "=== end". Checks run
 # under errexit + pipefail + inherit_errexit; command substitutions are assigned first, never used inline in arguments.
 #
@@ -7,8 +7,10 @@
 # last_ip only. Snippets: id, name, active, modified (no code). Options and posts: names, ids and lengths only. Secret
 # patterns: location and count only.
 export LC_ALL=C
-SINCE=${1:-26 hours ago}
-SITES="SITES"
+SINCE=${1:?since}
+shift
+SITES="$*"
+[ -n "$SITES" ] || { echo "usage: wp-forensics.sh <since> <name>:<docroot>..." >&2; exit 2; }
 echo "# taken $(date -u +%Y-%m-%dT%H:%M:%SZ) since: $SINCE"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 check() {

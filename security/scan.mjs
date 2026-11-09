@@ -9,6 +9,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import net from 'node:net';
 import semver from 'semver';
 import { cvss3 } from './cvss.mjs';
+import { readConfig } from '../core/paths.mjs';
 import { osvDecision, wpScore, wpDescription, bunAffected, collectorHealth, foreignToOsv } from './match.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -165,7 +166,7 @@ const reachable = (host, port) => new Promise((resolve) => {
 });
 
 // ---------- scan ----------
-const hosts = readJson(path.join(HERE, 'hosts.json'));
+const hosts = readConfig('security/hosts.json');
 const findings = readJson(path.join(STATE, 'findings.json'), {});
 const health = readJson(path.join(STATE, 'health.json'), {});
 const coverage = { at: now, hosts: {} };

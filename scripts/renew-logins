@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
+import { readConfig } from '../core/paths.mjs';
 
 const HOME = os.homedir();
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -17,7 +18,7 @@ const CDP = 'http://127.0.0.1:9222';
 const DAY = 86_400_000;
 const CLAUDE_MARGIN_DAYS = 5;
 const CODEX_EVERY_DAYS = 14;
-const GOOGLE_ACCOUNT = 'OWNER_EMAIL';
+const GOOGLE_ACCOUNT = readConfig('owner.json').google_account;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const state = fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : {};

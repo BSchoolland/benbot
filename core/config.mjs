@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { fileURLToPath } from 'node:url';
 
-export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+import { ROOT } from './paths.mjs';
+
+export { ROOT };
 export const STATE_DIR = path.join(ROOT, 'state');
 export const LOG_DIR = path.join(STATE_DIR, 'logs');
 export const WORKSPACES = path.join(ROOT, 'workspaces');
